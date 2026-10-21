@@ -1,3 +1,8 @@
+`ifndef SYS_LW_CAPS
+// CONF_STR field-1 token attesting the LW window sys_top decodes (lw_sys_window.sv).
+`define SYS_LW_CAPS "AXI:40000:80000:LW"
+`endif
+
 //Master input clock
 input         CLK_50M,
 
@@ -6,7 +11,7 @@ input         CLK_50M,
 input         RESET,
 
 //Must be passed to hps_io module
-inout  [45:0] HPS_BUS,
+inout  [94:0] HPS_BUS,
 
 //Base video clock. Usually equals to CLK_SYS.
 output        CLK_VIDEO,

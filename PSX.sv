@@ -197,7 +197,7 @@ wire reset_or = RESET | buttons[1] | status[0] | bios_download | exe_download | 
 
 `include "build_id.v"
 parameter CONF_STR = {
-	"PSX;SS3E000000:400000;",
+	"PSX;", `SYS_LW_CAPS, ",SS3E000000:400000;",
 	"H7S1,CUECHD,Load CD;",
 	"h7-,Reload core for CD;",
 	"F1,EXE,Load Exe;",

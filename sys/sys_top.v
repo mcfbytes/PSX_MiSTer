@@ -1753,11 +1753,47 @@ wire [13:0] fb_stride;
 	assign fb_stride = 0;
 `endif
 
+////////////////////  LW BRIDGE  ///////////////////////////////////
+// lwhps2fpga (0xFF200000, 2 MB): answers every offset (0xDEADBEEF default);
+// the `SYS_LW_CAPS window holds the directory and the PAD block.
+wire [20:0] lw_raddr, lw_waddr;
+wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
+wire [31:0] lw_rdata, lw_wdata;
+wire  [3:0] lw_be;
+wire [48:0] lw_pad;
+
+hps_lw_bridge hps_lw_bridge
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_ren(lw_ren),
+	.lw_rd_ack(lw_rd_ack),
+	.lw_rd_word(lw_rd_word),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be)
+);
+
+lw_sys_window lw_sys_window
+(
+	.clk(clk_100m),
+	.lw_raddr(lw_raddr),
+	.lw_rdata(lw_rdata),
+	.lw_waddr(lw_waddr),
+	.lw_write(lw_write),
+	.lw_wdata(lw_wdata),
+	.lw_be(lw_be),
+	.clk_sys(clk_sys),
+	.lw_pad(lw_pad)
+);
+
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
-	.HPS_BUS({f1, HDMI_TX_VS, 
+	.HPS_BUS({lw_pad, f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
