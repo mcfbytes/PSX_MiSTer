@@ -1,6 +1,6 @@
 `ifndef SYS_LW_CAPS
-// CONF_STR field-1 token attesting the LW window sys_top decodes (lw_sys_window.sv).
-`define SYS_LW_CAPS "AXI:40000:80000:LW"
+// CONF_STR field-1 tokens attesting the LW window sys_top decodes (lw_sys_window.sv) and its SECTOR doorbell.
+`define SYS_LW_CAPS "AXI:40000:80000:LW,IRQ:BLK=1:41000"
 `endif
 
 //Master input clock
@@ -11,7 +11,7 @@ input         CLK_50M,
 input         RESET,
 
 //Must be passed to hps_io module
-inout  [94:0] HPS_BUS,
+inout [148:0] HPS_BUS,
 
 //Base video clock. Usually equals to CLK_SYS.
 output        CLK_VIDEO,

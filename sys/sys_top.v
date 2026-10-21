@@ -570,7 +570,9 @@ cyclonev_hps_interface_peripheral_uart uart
 	.txd(uart_txd)
 );
 
-wire [63:0] f2h_irq = {video_sync,HDMI_TX_VS};
+// f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
+wire        lw_doorbell;
+wire [63:0] f2h_irq = {55'd0, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
@@ -1755,12 +1757,14 @@ wire [13:0] fb_stride;
 
 ////////////////////  LW BRIDGE  ///////////////////////////////////
 // lwhps2fpga (0xFF200000, 2 MB): answers every offset (0xDEADBEEF default);
-// the `SYS_LW_CAPS window holds the directory and the PAD block.
+// the `SYS_LW_CAPS window holds the directory, the PAD block and the SECTOR block.
 wire [20:0] lw_raddr, lw_waddr;
 wire        lw_ren, lw_rd_ack, lw_rd_word, lw_write;
 wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
+wire [34:0] lw_blk_up;
+wire [18:0] lw_blk_dn;
 
 hps_lw_bridge hps_lw_bridge
 (
@@ -1780,20 +1784,26 @@ lw_sys_window lw_sys_window
 (
 	.clk(clk_100m),
 	.lw_raddr(lw_raddr),
+	.lw_ren(lw_ren),
+	.lw_rd_ack(lw_rd_ack),
+	.lw_rd_word(lw_rd_word),
 	.lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr),
 	.lw_write(lw_write),
 	.lw_wdata(lw_wdata),
 	.lw_be(lw_be),
+	.doorbell(lw_doorbell),
 	.clk_sys(clk_sys),
-	.lw_pad(lw_pad)
+	.lw_pad(lw_pad),
+	.blk_up(lw_blk_up),
+	.blk_dn(lw_blk_dn)
 );
 
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
-	.HPS_BUS({lw_pad, f1, HDMI_TX_VS, 
+	.HPS_BUS({lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),

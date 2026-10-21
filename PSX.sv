@@ -897,6 +897,16 @@ end
 
 ////////////////////////////  SYSTEM  ///////////////////////////////////
 
+// CD sectors: hps_io slot 1, or the LW SECTOR block while sys_top enables it (sys/lw_blk_mux.sv)
+wire        cd_req, cd_ack, cd_wr;
+wire [15:0] cd_data;
+lw_blk_mux cd_lw
+(
+   .HPS_BUS(HPS_BUS), .reset(reset),
+   .core_req(cd_req), .core_lba(sd_lba1), .core_ack(cd_ack), .core_wr(cd_wr), .core_data(cd_data),
+   .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
+);
+
 psx_mister
 psx
 (
@@ -1000,11 +1010,11 @@ psx
    .trackinfo_addr  (ramdownload_wraddr[10:2]),
    .trackinfo_write (ramdownload_wr && cdinfo_download),
    .resetFromCD     (resetFromCD),
-   .cd_hps_req      (sd_rd[1]),
+   .cd_hps_req      (cd_req),
    .cd_hps_lba      (sd_lba1),
-   .cd_hps_ack      (sd_ack[1]),
-   .cd_hps_write    (sd_buff_wr),
-   .cd_hps_data     (sd_buff_dout),
+   .cd_hps_ack      (cd_ack),
+   .cd_hps_write    (cd_wr),
+   .cd_hps_data     (cd_data),
    // spuram
    .spuram_dataWrite(spuram_dataWrite),
    .spuram_Adr      (spuram_Adr      ),

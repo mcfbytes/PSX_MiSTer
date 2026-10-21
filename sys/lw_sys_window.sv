@@ -1,12 +1,16 @@
-// LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory + PAD block.
+// LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD block and SECTOR block.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
-// or a 16-deep FIFO (both analog ops, drop-and-count when full); a toggle handshake drains them round-robin to clk_sys.
+// or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a toggle handshake
+// drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) serves one hps_io read slot.
 
 module lw_sys_window
 (
 	input             clk,          // clk_100m
 
 	input      [20:0] lw_raddr,
+	input             lw_ren,
+	input             lw_rd_ack,
+	input             lw_rd_word,
 	output reg [31:0] lw_rdata,
 
 	input      [20:0] lw_waddr,
@@ -14,14 +18,25 @@ module lw_sys_window
 	input      [31:0] lw_wdata,
 	input       [3:0] lw_be,
 
+	output            doorbell,     // SECTOR cause level -> f2h_irq[8]
+
 	input             clk_sys,
-	output reg [48:0] lw_pad = 0    // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
+	output reg [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
+	input      [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
+	output     [18:0] blk_dn        // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
 );
 
 localparam [20:0] WIN_OFF  = 21'h40000;
 localparam [20:0] WIN_SIZE = 21'h80000;
-localparam [20:0] PAD_OFF  = 21'h40000;   // relative to the window
+localparam [20:0] SEC_OFF  = 21'h01000;   // relative to the window
+localparam [20:0] SEC_SIZE = 21'h02000;
+localparam [20:0] PAD_OFF  = 21'h40000;
 localparam [20:0] PAD_SIZE = 21'h40000;
+localparam  [7:0] SEC_SLOT  = 8'd1;
+localparam  [9:0] SEC_FRAME = 10'd588;
+localparam        SEC_AW    = 9;          // FIFO depth 512
+localparam [15:0] SEC_GAP   = 16'd2;      // clk_sys cycles between write strobes
+localparam  [5:0] DIR_WORDS = 6'd36;      // header + 2 entries
 
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
@@ -37,33 +52,57 @@ wire        r_in = (lw_raddr >= WIN_OFF) && (lw_raddr < WIN_OFF + WIN_SIZE);
 wire        w_in = (lw_waddr >= WIN_OFF) && (lw_waddr < WIN_OFF + WIN_SIZE);
 wire        r_pad = r_in && rwin >= PAD_OFF;
 wire        w_pad = w_in && wwin >= PAD_OFF;
+wire        r_sec = r_in && rwin >= SEC_OFF && rwin < SEC_OFF + SEC_SIZE;
+wire        w_sec = w_in && wwin >= SEC_OFF && wwin < SEC_OFF + SEC_SIZE;
 wire [20:0] wblk = wwin - PAD_OFF;
+wire [20:0] rsec = rwin - SEC_OFF;
+wire [20:0] wsec = wwin - SEC_OFF;
+wire [31:0] sec_rdata;
 
 always @(*) begin
 	lw_rdata = 32'hDEADBEEF;
 	if (r_pad) lw_rdata = (rwin == PAD_OFF + (21'h1A << 10)) ? adrop : 32'd0;
-	else if (r_in && rwin < 21'h50) begin
-		case (rwin[6:2])
-			5'd0:  lw_rdata = 32'h31535953;          // "SYS1"
-			5'd1:  lw_rdata = 32'h00010000;
-			5'd2:  lw_rdata = 32'd1;
-			5'd3:  lw_rdata = scratch;
-			5'd4:  lw_rdata = 32'd1;                 // kind PAD
-			5'd5:  lw_rdata = 32'h00010000;
-			5'd6:  lw_rdata = {11'd0, PAD_OFF};
-			5'd7:  lw_rdata = {11'd0, PAD_SIZE};
-			5'd8:  lw_rdata = PAD_OPS[ 31:  0];
-			5'd9:  lw_rdata = PAD_OPS[ 63: 32];
-			5'd10: lw_rdata = PAD_OPS[ 95: 64];
-			5'd11: lw_rdata = PAD_OPS[127: 96];
-			5'd12: lw_rdata = PAD_OPS[159:128];
-			5'd13: lw_rdata = PAD_OPS[191:160];
-			5'd14: lw_rdata = PAD_OPS[223:192];
-			5'd15: lw_rdata = PAD_OPS[255:224];
+	else if (r_sec) lw_rdata = sec_rdata;
+	else if (r_in && rwin < {DIR_WORDS, 2'b00}) begin
+		case (rwin[7:2])
+			6'd0:  lw_rdata = 32'h31535953;          // "SYS1"
+			6'd1:  lw_rdata = 32'h00010000;
+			6'd2:  lw_rdata = 32'd2;
+			6'd3:  lw_rdata = scratch;
+			6'd4:  lw_rdata = 32'd1;                 // entry 0: kind PAD
+			6'd5:  lw_rdata = 32'h00010000;
+			6'd6:  lw_rdata = {11'd0, PAD_OFF};
+			6'd7:  lw_rdata = {11'd0, PAD_SIZE};
+			6'd8:  lw_rdata = PAD_OPS[ 31:  0];
+			6'd9:  lw_rdata = PAD_OPS[ 63: 32];
+			6'd10: lw_rdata = PAD_OPS[ 95: 64];
+			6'd11: lw_rdata = PAD_OPS[127: 96];
+			6'd12: lw_rdata = PAD_OPS[159:128];
+			6'd13: lw_rdata = PAD_OPS[191:160];
+			6'd14: lw_rdata = PAD_OPS[223:192];
+			6'd15: lw_rdata = PAD_OPS[255:224];
+			6'd20: lw_rdata = 32'd2;                 // entry 1: kind SECTOR
+			6'd21: lw_rdata = 32'h00010000;
+			6'd22: lw_rdata = {11'd0, SEC_OFF};
+			6'd23: lw_rdata = {11'd0, SEC_SIZE};
+			6'd24: lw_rdata = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
+			6'd25: lw_rdata = {11'd0, WIN_OFF + SEC_OFF};   // CAUSE, absolute LW (= the IRQ:BLK offset)
+			6'd26: lw_rdata = {16'd1 << SEC_AW, SEC_GAP};
 			default: lw_rdata = 32'd0;
 		endcase
 	end
 end
+
+lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .AW(SEC_AW)) sector
+(
+	.clk(clk),
+	.raddr(rsec[12:0]), .rsel(r_sec), .ren(lw_ren), .rd_ack(lw_rd_ack), .rd_word(lw_rd_word), .rdata(sec_rdata),
+	.waddr(wsec[12:0]), .wsel(w_sec), .write(lw_write), .wdata(lw_wdata), .be(lw_be),
+	.doorbell(doorbell),
+	.clk_sys(clk_sys),
+	.c_reset(blk_up[34]), .hps_ack(blk_up[33]), .c_req(blk_up[32]), .c_lba(blk_up[31:0]),
+	.en_sys(blk_dn[18]), .o_ack(blk_dn[17]), .o_wr(blk_dn[16]), .o_dat(blk_dn[15:0])
+);
 
 // clk_100m side: SCRATCH, the pending slots, and the round-robin drain into the handshake.
 function automatic [2:0] slot_of(input [7:0] op);
@@ -89,10 +128,11 @@ function automatic [7:0] op_of(input [2:0] slot);
 	endcase
 endfunction
 
-reg [31:0] mask [0:5];
+// one M10K: digital masks at 0..5, the analog FIFO {right, idx, data[15:0]} at 16..31
+(* ramstyle = "M10K" *) reg [31:0] pram [0:31];
+reg [31:0] pq;
 reg  [5:0] dirty = 0;
 
-reg [24:0] afifo [0:15];                // {right, idx, data[15:0]}
 reg  [4:0] awp = 0, arp = 0;
 wire       aempty = (awp == arp);
 wire       afull  = (awp - arp) == 5'd16;
@@ -101,6 +141,8 @@ wire       st   = lw_write && w_pad && &lw_be;
 wire [7:0] wop  = wblk[17:10];
 wire [7:0] widx = wblk[9:2];
 wire [2:0] wsl  = slot_of(wop);
+wire       st_d = st && wsl != 3'd7 && widx == 8'd0;
+wire       st_a = st && (wop == 8'h1A || wop == 8'h3D) && !st_d;
 
 reg        req_t = 0;
 reg        ack_t = 0;
@@ -112,6 +154,8 @@ wire [6:0] ready = {~aempty, dirty};
 reg  [2:0] rr = 0;
 reg  [2:0] pick;
 reg        pick_v;
+reg  [1:0] ds = 0;                     // drain: 0 pick, 1 read, 2 launch
+reg  [2:0] psel = 0;
 integer    i, k;
 
 always @(*) begin
@@ -127,6 +171,14 @@ always @(*) begin
 	end
 end
 
+wire [4:0] pra = (psel == 3'd6) ? {1'b1, arp[3:0]} : {2'b00, psel};
+
+always @(posedge clk) begin
+	if (st_d) pram[{2'b00, wsl}] <= lw_wdata;
+	else if (st_a && !afull) pram[{1'b1, awp[3:0]}] <= {7'd0, wop == 8'h3D, widx, lw_wdata[15:0]};
+	pq <= pram[pra];
+end
+
 always @(posedge clk) begin
 	ack_s <= {ack_s[0], ack_t};
 
@@ -137,32 +189,29 @@ always @(posedge clk) begin
 		if (lw_be[3]) scratch[31:24] <= lw_wdata[31:24];
 	end
 
-	if (!busy && pick_v) begin
-		req_t <= ~req_t;
-		rr    <= (pick == 3'd6) ? 3'd0 : pick + 3'd1;
-		if (pick == 3'd6) begin
-			hold <= {afifo[arp[3:0]][24] ? 8'h3D : 8'h1A, afifo[arp[3:0]][23:16], 16'd0, afifo[arp[3:0]][15:0]};
-			arp  <= arp + 5'd1;
+	case (ds)
+		2'd0: if (!busy && pick_v) begin
+			psel <= pick;
+			rr   <= (pick == 3'd6) ? 3'd0 : pick + 3'd1;
+			ds   <= 2'd1;
 		end
-		else begin
-			hold        <= {op_of(pick), 8'd0, mask[pick]};
-			dirty[pick] <= 0;
+		2'd1: begin
+			if (psel == 3'd6) arp <= arp + 5'd1;
+			else dirty[psel] <= 0;
+			ds <= 2'd2;
 		end
-	end
+		default: begin
+			hold  <= (psel == 3'd6) ? {pq[24] ? 8'h3D : 8'h1A, pq[23:16], 16'd0, pq[15:0]} : {op_of(psel), 8'd0, pq};
+			req_t <= ~req_t;
+			ds    <= 2'd0;
+		end
+	endcase
 
-	// after the drain, so a store landing in the launch cycle stays dirty
-	if (st) begin
-		if (wsl != 3'd7 && widx == 8'd0) begin
-			mask[wsl]  <= lw_wdata;
-			dirty[wsl] <= 1;
-		end
-		else if (wop == 8'h1A || wop == 8'h3D) begin
-			if (afull) adrop <= adrop + 32'd1;
-			else begin
-				afifo[awp[3:0]] <= {wop == 8'h3D, widx, lw_wdata[15:0]};
-				awp <= awp + 5'd1;
-			end
-		end
+	// after the drain, so a store landing in the read cycle stays dirty (its RAM read returned the old word)
+	if (st_d) dirty[wsl] <= 1;
+	else if (st_a) begin
+		if (afull) adrop <= adrop + 32'd1;
+		else awp <= awp + 5'd1;
 	end
 end
 
