@@ -572,6 +572,13 @@ cyclonev_hps_interface_peripheral_uart uart
 
 // f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
 wire        lw_doorbell;
+
+// OSDBUF stores from lw_sys_window to both osd shadows.
+wire        lw_osd_we;
+wire  [9:0] lw_osd_addr;
+wire [31:0] lw_osd_data;
+wire  [3:0] lw_osd_be;
+wire  [1:0] lw_osd_ctrl;
 wire [63:0] f2h_irq = {55'd0, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
 cyclonev_hps_interface_interrupts interrupts
 (
@@ -1199,7 +1206,14 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.dout(hdmi_data_osd),
 		.hs_out(hdmi_hs_osd),
 		.vs_out(hdmi_vs_osd),
-		.de_out(hdmi_de_osd)
+		.de_out(hdmi_de_osd),
+
+		.clk_lw(clk_100m),
+		.lw_we(lw_osd_we),
+		.lw_addr(lw_osd_addr),
+		.lw_data(lw_osd_data),
+		.lw_be(lw_osd_be),
+		.lw_ctrl(lw_osd_ctrl)
 	);
 
 	wire hdmi_cs_osd;
@@ -1420,7 +1434,14 @@ osd vga_osd
 	.dout(vga_data_osd),
 	.hs_out(vga_hs_osd),
 	.vs_out(vga_vs_osd),
-	.de_out(vga_de_osd)
+	.de_out(vga_de_osd),
+
+	.clk_lw(clk_100m),
+	.lw_we(lw_osd_we),
+	.lw_addr(lw_osd_addr),
+	.lw_data(lw_osd_data),
+	.lw_be(lw_osd_be),
+	.lw_ctrl(lw_osd_ctrl)
 );
 
 wire vga_cs_osd;
@@ -1796,7 +1817,12 @@ lw_sys_window lw_sys_window
 	.clk_sys(clk_sys),
 	.lw_pad(lw_pad),
 	.blk_up(lw_blk_up),
-	.blk_dn(lw_blk_dn)
+	.blk_dn(lw_blk_dn),
+	.osd_we(lw_osd_we),
+	.osd_addr(lw_osd_addr),
+	.osd_data(lw_osd_data),
+	.osd_be(lw_osd_be),
+	.osd_ctrl(lw_osd_ctrl)
 );
 
 emu emu

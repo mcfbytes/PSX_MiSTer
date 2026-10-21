@@ -2,8 +2,11 @@
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
 // clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for the slot's consumer.
 // Bridge side has no reset and answers in fixed cycles (P2); a full FIFO drops the store and counts it.
+// DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:4], DROPS, COUNTS, GEN, TSTAMP_*, CYCLES, SUM and TEST:
+// they read 0 and CTRL.TEST/CLR are ignored. CAUSE, REQ, LBA, BEGIN, CTRL.EN/ABORT, STATUS[3:0], ACCEPT, ID stay.
 
-module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3, parameter AW = 9)
+module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3, parameter AW = 9,
+                   parameter DIAG = 1)
 (
 	input             clk,          // clk_100m
 
@@ -119,30 +122,30 @@ function automatic [7:0] sat8(input [7:0] v, input inc);
 endfunction
 
 always @(posedge clk) begin
-	cycles <= cycles + 32'd1;
+	if (DIAG) cycles <= cycles + 32'd1;
 	{sb2, sb1, sb0} <= {sb1, sb0, sys_bits};
 	{rg_s1, rg_s0}  <= {rg_s0, rgray};
 
 	// doorbell: the request rise raises, a raise beats a concurrent clear
 	gen     <= gen + fire;
 	pending <= fire | (pending & ~clr_c);
-	if (fire) begin
-		tsreq <= cycles;
-		lba   <= c_lba;               // stable while the request is open
-	end
+	if (fire) lba <= c_lba;           // stable while the request is open
+	if (DIAG && fire) tsreq <= cycles;
 	if (rd_cause & ren) snap <= gen[3:0];
 
-	if (ev[4]) tsdone <= cycles;
-	if (ev[4]) sum    <= sum_l;
+	if (DIAG && ev[4]) begin
+		tsdone <= cycles;
+		sum    <= sum_l;
+	end
 
 	if (w_ctrl) begin
 		en   <= wdata[0];
-		test <= wdata[3];
+		test <= DIAG ? wdata[3] : 1'b0;
 	end
 
 	// store path: never back-pressured, a full FIFO drops and counts
 	if (push & ffull) begin
-		if (~&drops)  drops  <= drops + 16'd1;
+		if (DIAG && ~&drops) drops <= drops + 16'd1;
 		if (~&fdrops) fdrops <= fdrops + 10'd1;
 	end
 	if (fwe) wptr <= wptr + 1'd1;
@@ -155,19 +158,21 @@ always @(posedge clk) begin
 	end
 	else if (wdat && !ffull && waddr[11:2] == exp_w) exp_w <= exp_w + 10'd1;
 
-	if (clr) begin
-		drops   <= 0;
-		frames  <= 0;
-		hw      <= 0;
-		{n_rej, n_skip, n_abort, n_rfill} <= 0;
-	end
-	else begin
-		if (used > hw) hw <= (used > 255) ? 8'd255 : used[7:0];
-		frames  <= frames + ev[4];
-		n_rej   <= sat8(n_rej,   ev[0]);
-		n_skip  <= sat8(n_skip,  ev[1]);
-		n_abort <= sat8(n_abort, ev[2]);
-		n_rfill <= sat8(n_rfill, ev[3]);
+	if (DIAG) begin
+		if (clr) begin
+			drops   <= 0;
+			frames  <= 0;
+			hw      <= 0;
+			{n_rej, n_skip, n_abort, n_rfill} <= 0;
+		end
+		else begin
+			if (used > hw) hw <= (used > 255) ? 8'd255 : used[7:0];
+			frames  <= frames + ev[4];
+			n_rej   <= sat8(n_rej,   ev[0]);
+			n_skip  <= sat8(n_skip,  ev[1]);
+			n_abort <= sat8(n_abort, ev[2]);
+			n_rfill <= sat8(n_rfill, ev[3]);
+		end
 	end
 end
 
@@ -182,15 +187,15 @@ always @(*) begin
 		4'h1: rdata = req_s ? {1'b1, 15'd0, SDSTAT} : 32'd0;
 		4'h2: rdata = lba;
 		4'h4: rdata = {28'd0, test, 2'b00, en};
-		4'h5: rdata = {frames, hw, 4'd0, st_s[3], st_s[2], st_s[1], st_s[0]};
+		4'h5: rdata = DIAG ? {frames, hw, 4'd0, st_s} : {28'd0, st_s};
 		4'h6: rdata = {ok, 5'd0, fdrops, 6'd0, exp_w};
-		4'h7: rdata = {16'd0, drops};
-		4'h8: rdata = {n_rej, n_skip, n_abort, n_rfill};
-		4'h9: rdata = gen;
-		4'hA: rdata = tsreq;
-		4'hB: rdata = tsdone;
-		4'hC: rdata = cycles;
-		4'hD: rdata = {12'd0, sum};
+		4'h7: rdata = DIAG ? {16'd0, drops} : 32'd0;
+		4'h8: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
+		4'h9: rdata = DIAG ? gen : 32'd0;
+		4'hA: rdata = DIAG ? tsreq : 32'd0;
+		4'hB: rdata = DIAG ? tsdone : 32'd0;
+		4'hC: rdata = DIAG ? cycles : 32'd0;
+		4'hD: rdata = DIAG ? {12'd0, sum} : 32'd0;
 		4'hE: rdata = 32'h31434553;     // "SEC1"
 		default: rdata = 32'd0;
 	endcase
@@ -210,7 +215,7 @@ wire [31:0] qd = q[31:0];
 
 always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 
-assign sys_bits = {evt, fs == F_REJECT, fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack, en_sys, c_req};
+assign sys_bits = {DIAG ? evt : 5'd0, fs == F_REJECT, fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack, en_sys, c_req};
 
 always @(posedge clk_sys) begin
 	{cs1, cs0}     <= {cs0, test, en};
@@ -241,7 +246,7 @@ always @(posedge clk_sys) begin
 		F_IDLE, F_REJECT:
 			if (qt == T_BEGIN) begin
 				fexp <= 0;
-				fsum <= 0;
+				if (DIAG) fsum <= 0;
 				if (test_s) begin
 					tmode <= 1;
 					fs    <= F_STREAM;
@@ -270,7 +275,7 @@ always @(posedge clk_sys) begin
 				hi    <= qd[31:16];
 				em    <= 1;
 				ph    <= 1;
-				fsum  <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
+				if (DIAG) fsum <= fsum + qd[31:24] + qd[23:16] + qd[15:8] + qd[7:0];
 			end
 			else evt[1] <= ~evt[1];
 
@@ -291,7 +296,7 @@ always @(posedge clk_sys) begin
 				fexp   <= 0;
 				o_ack  <= 0;
 				fs     <= F_IDLE;
-				sum_l  <= fsum;
+				if (DIAG) sum_l <= fsum;
 				evt[4] <= ~evt[4];
 			end
 			else fexp <= fexp + 1'd1;
