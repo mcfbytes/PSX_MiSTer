@@ -22,3 +22,9 @@ and two toggles one period apart must each be seen as a level change.
 - **A faster core** reusing this template must hold `F_REJECT` (and so `rjs`/`rjt`) for
   N = ceil(2 x f_sys / 100 MHz) clk_sys cycles before the next pop, or widen the crossing to a
   handshake. No such core exists today; the RTL is unchanged for PSX.
+
+## The fitted build
+
+RTL f96fa5c fits with `FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS` in `PSX.qsf`: 41,277 ALMs,
+peak routing 79%, hold clean, HDMI setup -0.469 ns (stock: -0.553 ns on the same ascal path).
+Bitstream `PSX_LWS3MC-f96fa5c.rbf`, md5 003f3812ff1a9db0a24ab31b88c315f4.
