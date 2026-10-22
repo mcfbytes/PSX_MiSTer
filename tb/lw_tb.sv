@@ -1046,6 +1046,51 @@ initial begin
 	axi_read(SEC + 21'h14, 0, d, dl, beats);
 	check("STATUS idle after the card fill", d[3:1], 3'b000);
 
+	$display("-- core reset during a card load: the stale BEGIN_S is rejected, the request re-opens");
+	r = mc1.done; s0 = mc1.strobes;
+	mc1.go(0, 7'h30); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);              // Main drains the ring
+	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
+	rd("LBA_S[2] 0x30", SEC + 21'h68, 32'h00000030);       // Main fills LBA 0x30 unleased ...
+	@(negedge clk_sys) cd_reset = 1;
+	repeat (4) @(negedge clk_sys);
+	cd_reset = 0;
+	mc1.go(0, 7'h00); settle;                              // ... the load restarts at LBA 0
+	axi_read(SEC + 21'h00, 0, d, dl, beats);              // the restart's ring, drained early
+	sec_wr(21'h48, 32'h00000030); settle;                  // the stale answer
+	axi_read(SEC + 21'h14, 0, d, dl, beats);
+	check("STATUS rejecting after the stale BEGIN_S", d[3:1], 3'b100);
+	check("the reject re-rings the doorbell", doorbell, 1);
+	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
+	rd("LBA_S[2] 0", SEC + 21'h68, 32'h00000000);
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000000);
+	frame_data(32'h00000000, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame at LBA 0 after the reject", mc1.done - r, 1);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h00, i)) bad = bad + 1;
+	check("card 1 buffer LBA 0", bad, 0);
+	rd("REQ idle after the re-served frame", SEC + 21'h04, 32'd0);
+	check("no ring left", doorbell, 0);
+
+	$display("-- a stale reject behind a newer answer re-opens nothing (the entry's tag)");
+	r = mc1.done; n0 = cd_frames;
+	mc1.go(0, 7'h31); settle;
+	cd_request(32'h00004000); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h0C, 32'h00004000);
+	frame_data(32'h00004000, 0, 588);                       // the feeder is still streaming it ...
+	sec_wr(21'h48, 32'h00000077);                           // ... when both card answers queue
+	sec_wr(21'h48, 32'h00000031);
+	wait_frame(n0);                                         // (the card data after: FIFO depth 512)
+	frame_data(32'h00000031, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame at 0x31", mc1.done - r, 1);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h31, i)) bad = bad + 1;
+	check("card 1 buffer 0x31", bad, 0);
+	check("the older answer's reject rang nothing", doorbell, 0);
+	rd("REQ idle", SEC + 21'h04, 32'd0);
+
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
 	axi_read(SEC + 21'h00, 0, d, dl, beats);

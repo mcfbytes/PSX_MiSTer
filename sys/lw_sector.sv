@@ -96,6 +96,7 @@ reg  [31:0] lba = 0;
 reg         en = 0, test = 0;
 reg   [1:0] xen = 0;                // CTRL[4+XSLOT0], CTRL[4+XSLOT1]
 reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the open request entered the FIFO
+reg   [2:0] btag = 0;               // per slot: toggled by each BEGIN/WACK entering, carried in its entry
 reg  [13:0] xlba = 0;
 reg   [9:0] flen_w = FRAME;
 reg   [9:0] exp_w = 0, fdrops = 0;
@@ -105,11 +106,11 @@ reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
 reg  [19:0] sum = 0;
 
-// clk_sys -> clk_100m: request levels, status bits, event toggles
-wire [13:0] sys_bits;
-`SYNC reg [13:0] sb0 = 0;
-`SYNC reg [13:0] sb1 = 0;
-reg  [13:0] sb2 = 0;
+// clk_sys -> clk_100m: request levels, status bits, event toggles, per-slot reject toggle + tag
+wire [19:0] sys_bits;
+`SYNC reg [19:0] sb0 = 0;
+`SYNC reg [19:0] sb1 = 0;
+reg  [19:0] sb2 = 0;
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
 wire  [3:0] st_s = sb1[4:1];          // {rejecting, streaming, ack, en_sys}
@@ -118,6 +119,8 @@ wire  [1:0] xrd_s = {sb1[12], sb1[10]};
 wire  [1:0] xwr_s = {sb1[13], sb1[11]};
 wire  [1:0] xreq_s = xrd_s | xwr_s;
 wire  [1:0] xrise  = xreq_s & ~({sb2[13], sb2[11]} | {sb2[12], sb2[10]});
+wire  [2:0] rjev   = sb1[16:14] ^ sb2[16:14];   // the feeder rejected a BEGIN/WACK of that slot
+wire  [2:0] rjtag  = sb1[19:17];                // ... carrying this tag (stable a clk_sys cycle before)
 wire  [2:0] cand   = {xreq_s & xen, req_s & en} & ~ans;
 wire        any    = |cand;
 wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : 2'd2;
@@ -145,11 +148,16 @@ wire        w_abort = w_ctrl & wdata[1];
 wire        clr     = w_ctrl & wdata[2];
 wire        rd_cause = rreg && raddr[6:2] == 5'h00 && rd_word;
 
-wire        fire  = req_rise | |(xrise & xen);
+wire  [2:0] bent  = {b_x1, b_x0, b_p} & {3{fwe}};
+wire  [2:0] reqs  = {xreq_s, req_s};
+// a reject of the LATEST answer re-opens the request: REQ shows it again and the doorbell re-rings
+wire  [2:0] unans = ans & rjev & ~(rjtag ^ btag) & ~bent;
+wire        fire  = req_rise | |(xrise & xen) | |(unans & reqs & {xen, en});
 wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
 wire        push  = w_begin | w_abort | wdat;
 wire        fwe   = push & ~ffull;
-wire [43:0] entry = w_begin ? {T_BEGIN, 7'd0, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
+wire        etag  = ~btag[bsel];
+wire [43:0] entry = w_begin ? {T_BEGIN, 6'd0, etag, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
 
 always @(posedge clk) if (fwe) fram[wptr[AW-1:0]] <= entry;
 
@@ -168,8 +176,10 @@ always @(posedge clk) begin
 	if (req_rise) lba <= c_lba;       // stable while the request is open
 	if (xrise[0]) xlba[6:0]  <= x_lba[6:0];
 	if (xrise[1]) xlba[13:7] <= x_lba[13:7];
-	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls
-	ans <= ({b_x1, b_x0, b_p} & {3{fwe}}) | (ans & {xreq_s, req_s});
+	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls or the
+	// feeder rejects that latest answer (a stale LBA after a core reset restarted the request)
+	ans  <= bent | (ans & reqs & ~unans);
+	btag <= btag ^ bent;
 	if (DIAG && fire) tsreq <= cycles;
 	if (rd_cause & ren) snap <= gen[3:0];
 
@@ -269,6 +279,7 @@ reg        fwack = 0;               // the open frame is a WACK: ack only, no st
 wire [9:0] flen  = (fsel == 2'd0) ? FRAME : XFRAME;
 wire [1:0] bs    = qi[1:0];
 wire       bwk   = qi[2];
+wire       btg   = qi[3];
 wire       fidle = (fs == F_IDLE || fs == F_REJECT);
 wire       bmatch = (bs == 2'd0) ? (!bwk && en_sys && c_req && qd == c_lba) :
                     (bs == 2'd1) ? (x_en_sys[0] && (bwk ? x_wr[0] : x_rd[0]) && qd == {25'd0, x_lba[6:0]}) :
@@ -276,7 +287,9 @@ wire       bmatch = (bs == 2'd0) ? (!bwk && en_sys && c_req && qd == c_lba) :
 
 always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 
-assign sys_bits = {x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt : 5'd0, fs == F_REJECT,
+reg  [2:0] rj = 0, rjt = 0, rjp = 0;   // reject toggle, its entry's tag, toggle due next cycle
+
+assign sys_bits = {rjt, rj, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt : 5'd0, fs == F_REJECT,
                    fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
@@ -292,6 +305,8 @@ always @(posedge clk_sys) begin
 	rgray <= rptr ^ (rptr >> 1);
 
 	o_wr <= 0;
+	rj   <= rj ^ rjp;
+	rjp  <= 0;
 
 	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low
 	if ((fidle || fsel != 2'd0) && !hps_ack) en_sys <= en_s;
@@ -341,6 +356,10 @@ always @(posedge clk_sys) begin
 				else begin
 					fs     <= F_REJECT;
 					evt[0] <= ~evt[0];
+					if (bs != 2'd3) begin
+						rjt[bs] <= btg;
+						rjp[bs] <= 1'b1;
+					end
 				end
 			end
 			else if (qt == T_ABORT) fs <= F_IDLE;
