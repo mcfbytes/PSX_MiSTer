@@ -1139,6 +1139,29 @@ initial begin
 	rd("REQ idle after all three", SEC + 21'h04, 32'd0);
 	check("no ring left after all three", doorbell, 0);
 
+	$display("-- adjacent rejects of two slots at PSX clk_sys: both requests re-open");
+	r = mc1.done; s0 = mc2.done;
+	mc1.go(0, 7'h24);
+	mc2.go(0, 7'h34); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sys_run = 0;                                            // both stale answers queue back to back
+	sec_wr(21'h48, 32'h00000025);
+	sec_wr(21'h4C, 32'h00000035);
+	sys_run = 1; settle;
+	rd("REQ shows card 1 re-opened", SEC + 21'h04, 32'h800080C9);
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000024);
+	frame_data(32'h00000024, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame at 0x24", mc1.done - r, 1);
+	rd("REQ shows card 2 re-opened", SEC + 21'h04, 32'h800080CD);
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h4C, 32'h00000034);
+	frame_data(32'h00000034, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 2 frame at 0x34", mc2.done - s0, 1);
+	rd("REQ idle after both re-opened", SEC + 21'h04, 32'd0);
+
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
 	axi_read(SEC + 21'h00, 0, d, dl, beats);
