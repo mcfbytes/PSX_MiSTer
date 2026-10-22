@@ -11,7 +11,7 @@ input         CLK_50M,
 input         RESET,
 
 //Must be passed to hps_io module
-inout [148:0] HPS_BUS,
+inout [181:0] HPS_BUS,
 
 //Base video clock. Usually equals to CLK_SYS.
 output        CLK_VIDEO,

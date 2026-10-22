@@ -1,7 +1,8 @@
 // LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR and OSDBUF blocks.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
 // or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a toggle handshake
-// drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) serves one hps_io read slot.
+// drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) serves the CD slot and both
+// memory-card slots; entry 1 words 7-12 declare each card slot, its DDR image base (wsrc) and extent.
 // OSDBUF decodes image stores and CTRL; the shadow RAMs live in each osd instance (osd.v).
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), the analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (rig builds) keeps them.
@@ -31,6 +32,8 @@ module lw_sys_window
 	output reg [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
 	input      [34:0] blk_up,       // {reset, hps_ack, req, lba[31:0]} on clk_sys, from emu
 	output     [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
+	input      [19:0] card_up,      // {card 2, card 1}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
+	output     [12:0] card_dn,      // {ack2, en_sys2, ack1, en_sys1, addr[8:0]} on clk_sys, to emu
 
 	output            osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
 	output      [9:0] osd_addr,
@@ -51,6 +54,13 @@ localparam  [7:0] SEC_SLOT  = 8'd1;
 localparam  [9:0] SEC_FRAME = 10'd588;
 localparam        SEC_AW    = 9;          // FIFO depth 512
 localparam [15:0] SEC_GAP   = 16'd2;      // clk_sys cycles between write strobes
+localparam  [3:0] MC_SLOT0  = 4'd2;       // memory card 1 (hps_io slot 2) and 2 (slot 3)
+localparam  [3:0] MC_SLOT1  = 4'd3;
+localparam  [9:0] MC_FRAME  = 10'd256;    // 1 KB blocks
+localparam  [7:0] MC_FLAGS  = 8'h03;      // RD: BEGIN_S frames; WR: WACK_S, bytes from the DDR image
+localparam [31:0] MC_WSRC0  = 32'h30100000;   // psx_top.vhd arbiter x"01"/x"02" & addr, DDRAM at 0x30000000
+localparam [31:0] MC_WSRC1  = 32'h30200000;
+localparam [31:0] MC_EXTENT = 32'h00020000;   // 128 blocks (7-bit sd_lba2/3) x 1 KB
 localparam [20:0] OSD_OFF  = 21'h04000;
 localparam [20:0] OSD_SIZE = 21'h02000;
 localparam [12:0] OSD_CTRL = 13'h1000;   // block-relative; the image is 0x0000-0x0FFF
@@ -108,12 +118,18 @@ always @(*) begin
 			6'd14: lw_rdata = PAD_OPS[223:192];
 			6'd15: lw_rdata = PAD_OPS[255:224];
 			6'd20: lw_rdata = 32'd2;                 // entry 1: kind SECTOR
-			6'd21: lw_rdata = 32'h00010000;
+			6'd21: lw_rdata = 32'h00010001;                 // minor 1: save slots (words 7-12)
 			6'd22: lw_rdata = {11'd0, SEC_OFF};
 			6'd23: lw_rdata = {11'd0, SEC_SIZE};
 			6'd24: lw_rdata = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
 			6'd25: lw_rdata = {11'd0, WIN_OFF + SEC_OFF};   // CAUSE, absolute LW (= the IRQ:BLK offset)
 			6'd26: lw_rdata = {16'd1 << SEC_AW, SEC_GAP};
+			6'd27: lw_rdata = {4'd0, MC_SLOT0, MC_FLAGS, 6'd0, MC_FRAME};
+			6'd28: lw_rdata = MC_WSRC0;
+			6'd29: lw_rdata = {4'd0, MC_SLOT1, MC_FLAGS, 6'd0, MC_FRAME};
+			6'd30: lw_rdata = MC_WSRC1;
+			6'd31: lw_rdata = MC_EXTENT;
+			6'd32: lw_rdata = MC_EXTENT;
 			6'd36: lw_rdata = 32'd3;                 // entry 2: kind OSDBUF
 			6'd37: lw_rdata = 32'h00010000;
 			6'd38: lw_rdata = {11'd0, OSD_OFF};
@@ -124,7 +140,8 @@ always @(*) begin
 	end
 end
 
-lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .AW(SEC_AW), .DIAG(DIAG)) sector
+lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .AW(SEC_AW), .DIAG(DIAG),
+            .XSLOT0(MC_SLOT0), .XSLOT1(MC_SLOT1), .XFRAME(MC_FRAME)) sector
 (
 	.clk(clk),
 	.raddr(rsec[12:0]), .rsel(r_sec), .ren(lw_ren), .rd_ack(lw_rd_ack), .rd_word(lw_rd_word), .rdata(sec_rdata),
@@ -132,7 +149,11 @@ lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .AW(SEC_AW), .DIAG(DIAG)) sector
 	.doorbell(doorbell),
 	.clk_sys(clk_sys),
 	.c_reset(blk_up[34]), .hps_ack(blk_up[33]), .c_req(blk_up[32]), .c_lba(blk_up[31:0]),
-	.en_sys(blk_dn[18]), .o_ack(blk_dn[17]), .o_wr(blk_dn[16]), .o_dat(blk_dn[15:0])
+	.en_sys(blk_dn[18]), .o_ack(blk_dn[17]), .o_wr(blk_dn[16]), .o_dat(blk_dn[15:0]),
+	.o_adr(card_dn[8:0]),
+	.x_hps_ack({card_up[19], card_up[9]}), .x_wr({card_up[18], card_up[8]}), .x_rd({card_up[17], card_up[7]}),
+	.x_lba({card_up[16:10], card_up[6:0]}),
+	.x_en_sys({card_dn[11], card_dn[9]}), .x_ack({card_dn[12], card_dn[10]})
 );
 
 // OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}.

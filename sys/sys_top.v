@@ -1786,6 +1786,8 @@ wire  [3:0] lw_be;
 wire [48:0] lw_pad;
 wire [34:0] lw_blk_up;
 wire [18:0] lw_blk_dn;
+wire [19:0] lw_card_up;
+wire [12:0] lw_card_dn;
 
 hps_lw_bridge hps_lw_bridge
 (
@@ -1818,6 +1820,8 @@ lw_sys_window lw_sys_window
 	.lw_pad(lw_pad),
 	.blk_up(lw_blk_up),
 	.blk_dn(lw_blk_dn),
+	.card_up(lw_card_up),
+	.card_dn(lw_card_dn),
 	.osd_we(lw_osd_we),
 	.osd_addr(lw_osd_addr),
 	.osd_data(lw_osd_data),
@@ -1829,7 +1833,8 @@ emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
-	.HPS_BUS({lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
+	.HPS_BUS({lw_card_up[19:10], lw_card_dn[12:11], lw_card_up[9:0], lw_card_dn[10:9], lw_card_dn[8:0],
+				 lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),

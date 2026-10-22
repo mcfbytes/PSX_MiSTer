@@ -185,7 +185,7 @@ always @(posedge clk_video) if(ce_pix) begin
 	v_info_start_5 <= rot[0] ? (infox + (infox << 2)) : (infoy + (infoy << 2));
 end
 
-always @(posedge clk_video) begin
+always @(posedge clk_video) begin : pix
 	reg        deD;
 	reg  [2:0] osd_div;
 	reg  [2:0] multiscan;
@@ -204,6 +204,7 @@ always @(posedge clk_video) begin
 	reg [12:0] ra;
 	reg  [7:0] lw_q0, lw_q1, lw_q2, lw_q3;
 	reg  [1:0] lw_lane;
+	reg        lw_hdr;                 // ra[12]: the header rows, never in the shadow
 	reg  [7:0] pbyte;
 
 	lwsel_v0 <= lw_ctrl[0];
@@ -295,7 +296,8 @@ always @(posedge clk_video) begin
 		lw_q2     <= lw_buf2[ra[11:2]];
 		lw_q3     <= lw_buf3[ra[11:2]];
 		lw_lane   <= ra[1:0];
-		pbyte      = ~lwsel_v1 ? osd_byte : lw_lane[1] ? (lw_lane[0] ? lw_q3 : lw_q2) : (lw_lane[0] ? lw_q1 : lw_q0);
+		lw_hdr    <= ra[12];
+		pbyte      = (~lwsel_v1 | lw_hdr) ? osd_byte : lw_lane[1] ? (lw_lane[0] ? lw_q3 : lw_q2) : (lw_lane[0] ? lw_q1 : lw_q0);
 		osd_pixel <= pbyte[rot[0] ? ((osd_hcnt2[2:0]-1'd1) ^ {3{~rot[1]}}) : osd_vcnt[2:0]];
 		osd_de[2:1] <= osd_de[1:0];
 	end

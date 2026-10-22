@@ -907,6 +907,27 @@ lw_blk_mux cd_lw
    .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
 );
 
+// memory cards: hps_io slots 2/3, or the LW SECTOR block per card while sys_top enables it
+wire       mc1_rd, mc1_wr, mc1_ack, mc1_write, mc2_rd, mc2_wr, mc2_ack, mc2_write;
+wire [8:0] mc1_addr, mc2_addr;
+wire [15:0] mc1_din, mc2_din;
+lw_card_mux #(.CARD(0)) mc1_lw
+(
+   .HPS_BUS(HPS_BUS),
+   .core_rd(mc1_rd), .core_wr(mc1_wr), .core_lba(sd_lba2), .core_ack(mc1_ack), .core_write(mc1_write),
+   .core_addr(mc1_addr), .core_data(mc1_din),
+   .hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+   .hps_data(sd_buff_dout)
+);
+lw_card_mux #(.CARD(1)) mc2_lw
+(
+   .HPS_BUS(HPS_BUS),
+   .core_rd(mc2_rd), .core_wr(mc2_wr), .core_lba(sd_lba3), .core_ack(mc2_ack), .core_write(mc2_write),
+   .core_addr(mc2_addr), .core_data(mc2_din),
+   .hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+   .hps_data(sd_buff_dout)
+);
+
 psx_mister
 psx
 (
@@ -1031,23 +1052,23 @@ psx
    .memcard_save    (memcard_save),
    .memcard1_mounted   (sd_mounted2),
    .memcard1_available (memcard1_inserted),
-   .memcard1_rd     (sd_rd[2]),
-   .memcard1_wr     (sd_wr[2]),
+   .memcard1_rd     (mc1_rd),
+   .memcard1_wr     (mc1_wr),
    .memcard1_lba    (sd_lba2),
-   .memcard1_ack    (sd_ack[2]),
-   .memcard1_write  (sd_buff_wr),
-   .memcard1_addr   (sd_buff_addr[8:0]),
-   .memcard1_dataIn (sd_buff_dout),
+   .memcard1_ack    (mc1_ack),
+   .memcard1_write  (mc1_write),
+   .memcard1_addr   (mc1_addr),
+   .memcard1_dataIn (mc1_din),
    .memcard1_dataOut(sd_buff_din2),
    .memcard2_mounted   (sd_mounted3),
    .memcard2_available (memcard2_inserted),
-   .memcard2_rd     (sd_rd[3]),
-   .memcard2_wr     (sd_wr[3]),
+   .memcard2_rd     (mc2_rd),
+   .memcard2_wr     (mc2_wr),
    .memcard2_lba    (sd_lba3),
-   .memcard2_ack    (sd_ack[3]),
-   .memcard2_write  (sd_buff_wr),
-   .memcard2_addr   (sd_buff_addr[8:0]),
-   .memcard2_dataIn (sd_buff_dout),
+   .memcard2_ack    (mc2_ack),
+   .memcard2_write  (mc2_write),
+   .memcard2_addr   (mc2_addr),
+   .memcard2_dataIn (mc2_din),
    .memcard2_dataOut(sd_buff_din3),
    // video
    .videoout_on     (~status[14]),

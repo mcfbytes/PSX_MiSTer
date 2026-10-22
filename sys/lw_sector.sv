@@ -1,12 +1,15 @@
-// SECTOR block (LW directory kind 2): one hps_io read slot served over the LW bridge.
+// SECTOR block (LW directory kind 2, minor 1, "SEC2"): one hps_io read slot (the primary) plus two
+// save slots (X0, X1) served over the LW bridge by ONE feeder. A save slot READ is a BEGIN_S frame of
+// XFRAME words with a strobe address; a save slot WRITE is answered by WACK_S (ack, no strobes): Main
+// takes the bytes from the core's declared DDR image. Fixed priority: primary, X0, X1.
 // clk_100m side: the register map, the BLK doorbell cause and the store path into a dual-clock FIFO.
-// clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for the slot's consumer.
+// clk_sys side: the feeder that re-creates hps_io's ack + 16-bit write strobes for each slot's consumer.
 // Bridge side has no reset and answers in fixed cycles (P2); a full FIFO drops the store and counts it.
 // DIAG=0 (LW_DIAG=0, shipping) compiles out STATUS[31:4], DROPS, COUNTS, GEN, TSTAMP_*, CYCLES, SUM and TEST:
 // they read 0 and CTRL.TEST/CLR are ignored. CAUSE, REQ, LBA, BEGIN, CTRL.EN/ABORT, STATUS[3:0], ACCEPT, ID stay.
 
 module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parameter [2:0] BLKSZ = 3, parameter AW = 9,
-                   parameter DIAG = 1)
+                   parameter DIAG = 1, parameter [3:0] XSLOT0 = 2, parameter [3:0] XSLOT1 = 3, parameter [9:0] XFRAME = 256)
 (
 	input             clk,          // clk_100m
 
@@ -30,12 +33,21 @@ module lw_sector #(parameter [7:0] SLOT = 1, parameter [9:0] FRAME = 588, parame
 	input      [31:0] c_lba,
 	input             hps_ack,      // the SPI path's ack for this slot
 	output reg        en_sys = 0,   // mux state: 1 = this block owns the consumer's ack/write/data
-	output reg        o_ack  = 0,
+	output            o_ack,
 	output reg        o_wr   = 0,
-	output reg [15:0] o_dat  = 0
+	output reg [15:0] o_dat  = 0,
+	output reg  [8:0] o_adr  = 0,   // save-slot strobe address: {word, half}, hps_io's sd_buff_addr order
+
+	input       [1:0] x_rd,         // save slots X0/X1 (clk_sys): read and write requests, LBA, SPI ack
+	input       [1:0] x_wr,
+	input      [13:0] x_lba,        // {X1, X0}, 7 bits each
+	input       [1:0] x_hps_ack,
+	output reg  [1:0] x_en_sys = 0,
+	output      [1:0] x_ack
 );
 
 localparam [15:0] SDSTAT = {1'b1, 6'd0, BLKSZ, SLOT[3:0], 1'b0, 1'b1};
+localparam [3:0]  PSLOT  = SLOT[3:0];
 localparam [1:0]  T_DATA = 2'd0, T_BEGIN = 2'd1, T_ABORT = 2'd2;
 
 `define SYNC (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
@@ -82,6 +94,10 @@ reg  [31:0] gen = 0, tsreq = 0, tsdone = 0, cycles = 0;
 reg   [3:0] snap = 0;
 reg  [31:0] lba = 0;
 reg         en = 0, test = 0;
+reg   [1:0] xen = 0;                // CTRL[4+XSLOT0], CTRL[4+XSLOT1]
+reg   [2:0] ans = 0;                // {X1, X0, primary}: a BEGIN/WACK for the open request entered the FIFO
+reg  [13:0] xlba = 0;
+reg   [9:0] flen_w = FRAME;
 reg   [9:0] exp_w = 0, fdrops = 0;
 reg         bfail = 0;
 reg  [15:0] drops = 0, frames = 0;
@@ -89,31 +105,51 @@ reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
 reg  [19:0] sum = 0;
 
-// clk_sys -> clk_100m: request level, status bits, event toggles
-wire  [9:0] sys_bits;
-`SYNC reg [9:0] sb0 = 0;
-`SYNC reg [9:0] sb1 = 0;
-reg   [9:0] sb2 = 0;
+// clk_sys -> clk_100m: request levels, status bits, event toggles
+wire [13:0] sys_bits;
+`SYNC reg [13:0] sb0 = 0;
+`SYNC reg [13:0] sb1 = 0;
+reg  [13:0] sb2 = 0;
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
 wire  [3:0] st_s = sb1[4:1];          // {rejecting, streaming, ack, en_sys}
 wire  [4:0] ev   = sb1[9:5] ^ sb2[9:5]; // {done, reset_fill, abort, skip, reject}
+wire  [1:0] xrd_s = {sb1[12], sb1[10]};
+wire  [1:0] xwr_s = {sb1[13], sb1[11]};
+wire  [1:0] xreq_s = xrd_s | xwr_s;
+wire  [1:0] xrise  = xreq_s & ~({sb2[13], sb2[11]} | {sb2[12], sb2[10]});
+wire  [2:0] cand   = {xreq_s & xen, req_s & en} & ~ans;
+wire        any    = |cand;
+wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : 2'd2;
+wire [15:0] xst0   = {1'b1, 6'd0, BLKSZ, XSLOT0, xwr_s[0], xrd_s[0]};
+wire [15:0] xst1   = {1'b1, 6'd0, BLKSZ, XSLOT1, xwr_s[1], xrd_s[1]};
+wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? SDSTAT : pick == 2'd1 ? xst0 : xst1;
 
-wire        rreg  = rsel & ~raddr[12] & ~|raddr[11:6];
-wire        wreg  = wsel & write & ~waddr[12] & ~|waddr[11:6] & &be;
+wire        rreg  = rsel & ~raddr[12] & ~|raddr[11:7];
+wire        wreg  = wsel & write & ~waddr[12] & ~|waddr[11:7] & &be;
 wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < FRAME);
-wire        w_cause = wreg && waddr[5:2] == 4'h0;
-wire        w_begin = wreg && waddr[5:2] == 4'h3;
-wire        w_ctrl  = wreg && waddr[5:2] == 4'h4;
+wire  [4:0] widx  = waddr[6:2];
+wire  [3:0] ws    = {2'b00, waddr[3:2]};          // BEGIN_S/WACK_S slot number
+wire        w_cause = wreg && widx == 5'h00;
+wire        w_ctrl  = wreg && widx == 5'h04;
+wire        w_bs    = wreg && (widx == 5'h03 || widx[4:2] == 3'b100);   // BEGIN, BEGIN_S[s]
+wire        w_wk    = wreg && widx[4:2] == 3'b101;                       // WACK_S[s]
+wire  [3:0] bslot   = (widx == 5'h03) ? PSLOT : ws;
+wire        b_p     = w_bs && bslot == PSLOT;
+wire        b_x0    = (w_bs | w_wk) && ws == XSLOT0 && widx != 5'h03;
+wire        b_x1    = (w_bs | w_wk) && ws == XSLOT1 && widx != 5'h03;
+wire        w_begin = b_p | b_x0 | b_x1;
+wire  [1:0] bsel    = b_x0 ? 2'd1 : b_x1 ? 2'd2 : 2'd0;
+wire  [9:0] blen    = w_wk ? 10'd0 : b_p ? FRAME : XFRAME;
 wire        w_abort = w_ctrl & wdata[1];
 wire        clr     = w_ctrl & wdata[2];
-wire        rd_cause = rreg && raddr[5:2] == 4'h0 && rd_word;
+wire        rd_cause = rreg && raddr[6:2] == 5'h00 && rd_word;
 
-wire        fire  = req_rise;
+wire        fire  = req_rise | |(xrise & xen);
 wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
 wire        push  = w_begin | w_abort | wdat;
 wire        fwe   = push & ~ffull;
-wire [43:0] entry = w_begin ? {T_BEGIN, 10'd0, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
+wire [43:0] entry = w_begin ? {T_BEGIN, 7'd0, w_wk, bsel, wdata} : w_abort ? {T_ABORT, 42'd0} : {T_DATA, waddr[11:2], wdata};
 
 always @(posedge clk) if (fwe) fram[wptr[AW-1:0]] <= entry;
 
@@ -129,7 +165,11 @@ always @(posedge clk) begin
 	// doorbell: the request rise raises, a raise beats a concurrent clear
 	gen     <= gen + fire;
 	pending <= fire | (pending & ~clr_c);
-	if (fire) lba <= c_lba;           // stable while the request is open
+	if (req_rise) lba <= c_lba;       // stable while the request is open
+	if (xrise[0]) xlba[6:0]  <= x_lba[6:0];
+	if (xrise[1]) xlba[13:7] <= x_lba[13:7];
+	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls
+	ans <= ({b_x1, b_x0, b_p} & {3{fwe}}) | (ans & {xreq_s, req_s});
 	if (DIAG && fire) tsreq <= cycles;
 	if (rd_cause & ren) snap <= gen[3:0];
 
@@ -140,6 +180,7 @@ always @(posedge clk) begin
 
 	if (w_ctrl) begin
 		en   <= wdata[0];
+		xen  <= {wdata[4 + XSLOT1], wdata[4 + XSLOT0]};
 		test <= DIAG ? wdata[3] : 1'b0;
 	end
 
@@ -153,6 +194,7 @@ always @(posedge clk) begin
 
 	if (w_begin) begin
 		exp_w  <= 0;
+		flen_w <= blen;
 		bfail  <= ffull;
 		fdrops <= ffull ? 10'd1 : 10'd0;
 	end
@@ -178,34 +220,43 @@ end
 
 assign doorbell = pending;
 
-wire ok = (exp_w == FRAME) & ~bfail;
+wire ok = (exp_w == flen_w) & ~bfail;
 
 always @(*) begin
 	rdata = 32'd0;
-	if (rreg) case (raddr[5:2])
-		4'h0: rdata = pending ? {12'd0, 4'b0001, SDSTAT} : 32'd0;
-		4'h1: rdata = req_s ? {1'b1, 15'd0, SDSTAT} : 32'd0;
-		4'h2: rdata = lba;
-		4'h4: rdata = {28'd0, test, 2'b00, en};
-		4'h5: rdata = DIAG ? {frames, hw, 4'd0, st_s} : {28'd0, st_s};
-		4'h6: rdata = {ok, 5'd0, fdrops, 6'd0, exp_w};
-		4'h7: rdata = DIAG ? {16'd0, drops} : 32'd0;
-		4'h8: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
-		4'h9: rdata = DIAG ? gen : 32'd0;
-		4'hA: rdata = DIAG ? tsreq : 32'd0;
-		4'hB: rdata = DIAG ? tsdone : 32'd0;
-		4'hC: rdata = DIAG ? cycles : 32'd0;
-		4'hD: rdata = DIAG ? {12'd0, sum} : 32'd0;
-		4'hE: rdata = 32'h31434553;     // "SEC1"
+	if (rreg) case (raddr[6:2])
+		5'h00: rdata = pending ? {12'd0, 4'b0001, any ? pst : SDSTAT} : 32'd0;
+		5'h01: rdata = {any, 15'd0, pst};
+		5'h02: rdata = lba;
+		5'h04: begin
+			rdata = {28'd0, test, 2'b00, en};
+			rdata[4 + XSLOT0] = xen[0];
+			rdata[4 + XSLOT1] = xen[1];
+		end
+		5'h05: rdata = DIAG ? {frames, hw, 4'd0, st_s} : {28'd0, st_s};
+		5'h06: rdata = {ok, 5'd0, fdrops, 6'd0, exp_w};
+		5'h07: rdata = DIAG ? {16'd0, drops} : 32'd0;
+		5'h08: rdata = DIAG ? {n_rej, n_skip, n_abort, n_rfill} : 32'd0;
+		5'h09: rdata = DIAG ? gen : 32'd0;
+		5'h0A: rdata = DIAG ? tsreq : 32'd0;
+		5'h0B: rdata = DIAG ? tsdone : 32'd0;
+		5'h0C: rdata = DIAG ? cycles : 32'd0;
+		5'h0D: rdata = DIAG ? {12'd0, sum} : 32'd0;
+		5'h0E: rdata = 32'h32434553;     // "SEC2"
+		5'h18, 5'h19, 5'h1A, 5'h1B:      // LBA_S[s]
+			rdata = ({2'b00, raddr[3:2]} == PSLOT)  ? lba :
+			        ({2'b00, raddr[3:2]} == XSLOT0) ? {25'd0, xlba[6:0]} :
+			        ({2'b00, raddr[3:2]} == XSLOT1) ? {25'd0, xlba[13:7]} : 32'd0;
 		default: rdata = 32'd0;
 	endcase
 end
 
 /////////////////////////////// clk_sys: feeder ///////////////////////////
 
-`SYNC reg [1:0] cs0 = 0;
-`SYNC reg [1:0] cs1 = 0;
-wire en_s = cs1[0], test_s = cs1[1];
+`SYNC reg [3:0] cs0 = 0;
+`SYNC reg [3:0] cs1 = 0;
+wire       en_s = cs1[0], test_s = cs1[1];
+wire [1:0] xen_s = cs1[3:2];
 
 wire       rempty = (rgray == wg_s1);
 wire       pop    = ~rempty & ~qv & (fs != F_FILL) & (fs != F_ACK) & (~em | ph == 2'd3);
@@ -213,12 +264,27 @@ wire [1:0] qt = q[43:42];
 wire [9:0] qi = q[41:32];
 wire [31:0] qd = q[31:0];
 
+reg  [1:0] fsel  = 0;               // the slot the open frame serves: 0 primary, 1 X0, 2 X1
+reg        fwack = 0;               // the open frame is a WACK: ack only, no strobes
+wire [9:0] flen  = (fsel == 2'd0) ? FRAME : XFRAME;
+wire [1:0] bs    = qi[1:0];
+wire       bwk   = qi[2];
+wire       fidle = (fs == F_IDLE || fs == F_REJECT);
+wire       bmatch = (bs == 2'd0) ? (!bwk && en_sys && c_req && qd == c_lba) :
+                    (bs == 2'd1) ? (x_en_sys[0] && (bwk ? x_wr[0] : x_rd[0]) && qd == {25'd0, x_lba[6:0]}) :
+                    (bs == 2'd2) ? (x_en_sys[1] && (bwk ? x_wr[1] : x_rd[1]) && qd == {25'd0, x_lba[13:7]}) : 1'b0;
+
 always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 
-assign sys_bits = {DIAG ? evt : 5'd0, fs == F_REJECT, fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack, en_sys, c_req};
+assign sys_bits = {x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt : 5'd0, fs == F_REJECT,
+                   fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
+
+reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
+assign o_ack = fack[0];
+assign x_ack = fack[2:1];
 
 always @(posedge clk_sys) begin
-	{cs1, cs0}     <= {cs0, test, en};
+	{cs1, cs0}     <= {cs0, xen, test, en};
 	{wg_s1, wg_s0} <= {wg_s0, wgray};
 
 	qv <= pop;
@@ -227,16 +293,27 @@ always @(posedge clk_sys) begin
 
 	o_wr <= 0;
 
-	if ((fs == F_IDLE || fs == F_REJECT) && !hps_ack) en_sys <= en_s;
+	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low
+	if ((fidle || fsel != 2'd0) && !hps_ack) en_sys <= en_s;
+	if ((fidle || fsel != 2'd1) && !x_hps_ack[0]) x_en_sys[0] <= xen_s[0];
+	if ((fidle || fsel != 2'd2) && !x_hps_ack[1]) x_en_sys[1] <= xen_s[1];
 
 	if (fs == F_ACK) begin
 		ackc <= ackc - 1'd1;
-		if (ackc == 1) fs <= F_STREAM;
+		if (ackc == 1) begin
+			if (fwack) begin
+				fack[fsel] <= 1'b0;
+				fs     <= F_IDLE;
+				evt[4] <= ~evt[4];
+			end
+			else fs <= F_STREAM;
+		end
 	end
 
 	if (fs == F_FILL && !em) begin
 		o_wr  <= ~tmode;
 		o_dat <= 0;
+		o_adr <= {fexp[7:0], 1'b0};
 		hi    <= 0;
 		em    <= 1;
 		ph    <= 1;
@@ -247,13 +324,17 @@ always @(posedge clk_sys) begin
 			if (qt == T_BEGIN) begin
 				fexp <= 0;
 				if (DIAG) fsum <= 0;
-				if (test_s) begin
+				if (test_s && !bwk) begin
 					tmode <= 1;
+					fsel  <= bs;
+					fwack <= 0;
 					fs    <= F_STREAM;
 				end
-				else if (en_sys && c_req && qd == c_lba) begin
+				else if (bmatch) begin
 					tmode <= 0;
-					o_ack <= 1;
+					fsel  <= bs;
+					fwack <= bwk;
+					fack[bs] <= 1'b1;
 					ackc  <= 2;
 					fs    <= F_ACK;
 				end
@@ -272,6 +353,7 @@ always @(posedge clk_sys) begin
 			else if (qi == fexp) begin
 				o_wr  <= ~tmode;
 				o_dat <= qd[15:0];
+				o_adr <= {fexp[7:0], 1'b0};
 				hi    <= qd[31:16];
 				em    <= 1;
 				ph    <= 1;
@@ -287,14 +369,15 @@ always @(posedge clk_sys) begin
 		2'd2: begin
 			o_wr  <= ~tmode;
 			o_dat <= hi;
+			o_adr <= {fexp[7:0], 1'b1};
 			ph    <= 3;
 		end
 		2'd3: begin
 			em <= 0;
 			ph <= 0;
-			if (fexp == FRAME - 1'd1) begin
+			if (fexp == flen - 1'd1) begin
 				fexp   <= 0;
-				o_ack  <= 0;
+				fack[fsel] <= 1'b0;
 				fs     <= F_IDLE;
 				if (DIAG) sum_l <= fsum;
 				evt[4] <= ~evt[4];
@@ -305,7 +388,11 @@ always @(posedge clk_sys) begin
 	endcase
 
 	if (c_reset) begin
-		if (fs == F_STREAM || fs == F_ACK) begin
+		if (fs == F_ACK && fwack) begin
+			fack[fsel] <= 1'b0;
+			fs <= F_IDLE;
+		end
+		else if (fs == F_STREAM || fs == F_ACK) begin
 			fs     <= F_FILL;
 			evt[3] <= ~evt[3];
 		end

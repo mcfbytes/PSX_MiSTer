@@ -37,6 +37,31 @@ always @(posedge clk) begin
 end
 endmodule
 
+// A memory card (rtl/memcard.vhd's HPS handshake): rd or wr with the LBA, both dropped on ack; the
+// transfer ends when ack falls. The buffer (dpram port B) is written on write & ack at addr.
+module mc_model(input clk, input reset, output reg rd = 0, output reg wr = 0, output reg [6:0] lba = 0,
+                input ack, input write, input [8:0] addr, input [15:0] din, input [8:0] haddr, output reg [15:0] dout);
+reg  [15:0] ram [0:511];
+integer     strobes = 0, done = 0;
+reg         busy = 0, seen = 0;
+always @(posedge clk) begin
+	dout <= ram[haddr];
+	if (write && ack) begin
+		ram[addr] <= din;
+		strobes   <= strobes + 1;
+	end
+	if (ack) begin rd <= 0; wr <= 0; end
+	if (reset) begin rd <= 0; wr <= 0; busy <= 0; seen <= 0; end
+	else if (busy) begin
+		if (ack) seen <= 1;
+		else if (seen) begin busy <= 0; seen <= 0; done <= done + 1; end
+	end
+end
+task go(input is_wr, input [6:0] l);
+	begin @(negedge clk); lba = l; if (is_wr) wr = 1; else rd = 1; busy = 1; seen = 0; end
+endtask
+endmodule
+
 module tb;
 
 `ifdef LW_DIAG
@@ -71,6 +96,8 @@ wire [48:0] lw_pad;
 wire        doorbell;
 wire [34:0] blk_up;
 wire [18:0] blk_dn;
+wire [19:0] card_up;
+wire [12:0] card_dn;
 wire        osd_we;
 wire  [9:0] osd_addr;
 wire [31:0] osd_data;
@@ -90,7 +117,7 @@ lw_sys_window win
 	.lw_raddr(lw_raddr), .lw_ren(lw_ren), .lw_rd_ack(lw_rd_ack), .lw_rd_word(lw_rd_word), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be),
 	.doorbell(doorbell),
-	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn),
+	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
 	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl)
 );
 
@@ -139,7 +166,9 @@ wire [31:0] rdata = bridge.hps2fpga_light_weight.rdata;
 // HPS_BUS as sys_top wires it: {blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
 reg         io_enable = 0, io_strobe = 0;
 reg  [15:0] io_din = 0;
-wire [148:0] hps_bus;
+wire [181:0] hps_bus;
+assign card_up = {hps_bus[181:172], hps_bus[169:160]};
+assign {hps_bus[171:170], hps_bus[159:158], hps_bus[157:149]} = {card_dn[12:11], card_dn[10:9], card_dn[8:0]};
 assign blk_up = hps_bus[148:114];
 assign hps_bus[113:95] = blk_dn;
 assign hps_bus[94:46] = lw_pad;
@@ -157,21 +186,22 @@ reg         cd_req = 0;
 reg  [31:0] cd_lba = 32'hFFFFFFFF;
 wire        cd_ack, cd_wr;
 wire [15:0] cd_data;
-wire  [3:0] sd_rd, sd_ack;
+wire  [3:0] sd_rd, sd_wr, sd_ack;
 wire [15:0] sd_buff_dout;
 wire        sd_buff_wr;
+wire  [8:0] sd_buff_addr;
 wire [31:0] sd_lba [4];
 wire [15:0] sd_buff_din [4];
 assign sd_rd[0] = 0;
-assign sd_rd[3:2] = 0;
+assign sd_wr[1:0] = 0;
 assign sd_lba[0] = 0;
 assign sd_lba[1] = cd_lba;
-assign sd_lba[2] = 0;
-assign sd_lba[3] = 0;
+assign sd_lba[2] = {25'd0, mc1.lba};
+assign sd_lba[3] = {25'd0, mc2.lba};
 assign sd_buff_din[0] = 0;
 assign sd_buff_din[1] = 0;
-assign sd_buff_din[2] = 0;
-assign sd_buff_din[3] = 0;
+assign sd_buff_din[2] = mc1.dout;
+assign sd_buff_din[3] = mc2.dout;
 
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
@@ -180,8 +210,33 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3),
 	.joystick_l_analog_0(ana0), .joystick_l_analog_3(ana3),
 	.joystick_r_analog_0(rana0), .joystick_r_analog_3(rana3), .paddle_1(pdl1),
-	.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(4'd0), .sd_ack(sd_ack),
-	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr)
+	.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
+	.sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr), .sd_buff_addr(sd_buff_addr)
+);
+
+// The PSX.sv memory cards, as instantiated there.
+wire        mc1_ack, mc1_write, mc2_ack, mc2_write;
+wire  [8:0] mc1_addr, mc2_addr;
+wire [15:0] mc1_din, mc2_din;
+mc_model mc1(.clk(clk_sys), .reset(cd_reset), .ack(mc1_ack), .write(mc1_write), .addr(mc1_addr), .din(mc1_din),
+             .haddr(sd_buff_addr));
+mc_model mc2(.clk(clk_sys), .reset(cd_reset), .ack(mc2_ack), .write(mc2_write), .addr(mc2_addr), .din(mc2_din),
+             .haddr(sd_buff_addr));
+lw_card_mux #(.CARD(0)) mc1_lw
+(
+	.HPS_BUS(hps_bus),
+	.core_rd(mc1.rd), .core_wr(mc1.wr), .core_lba(mc1.lba), .core_ack(mc1_ack), .core_write(mc1_write),
+	.core_addr(mc1_addr), .core_data(mc1_din),
+	.hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+	.hps_data(sd_buff_dout)
+);
+lw_card_mux #(.CARD(1)) mc2_lw
+(
+	.HPS_BUS(hps_bus),
+	.core_rd(mc2.rd), .core_wr(mc2.wr), .core_lba(mc2.lba), .core_ack(mc2_ack), .core_write(mc2_write),
+	.core_addr(mc2_addr), .core_data(mc2_din),
+	.hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+	.hps_data(sd_buff_dout)
 );
 
 // The PSX.sv CD mux, as instantiated there.
@@ -505,6 +560,43 @@ endfunction
 
 integer r, bad;
 
+// The header rows (ra[12], MENU_CORE builds) always read osd_buffer, never the shadow: on every pixel step
+// with LWSEL set, a header byte must be the SPI byte. Old values sampled at the edge, pbyte read after.
+integer hdr_n = 0, hdr_bad = 0, shd_n = 0, c_n = 0, l_n = 0;
+always @(posedge clk_vid) begin : hdr_watch
+	reg h, l, c;
+	reg [7:0] o;
+	c = hdmi_osd.ce_pix; h = hdmi_osd.pix.lw_hdr; l = hdmi_osd.lwsel_v1; o = hdmi_osd.pix.osd_byte;
+	#0.5;
+	if (c) c_n = c_n + 1;
+	if (l) l_n = l_n + 1;
+	if (c && l && h) begin
+		hdr_n = hdr_n + 1;
+		if (hdmi_osd.pix.pbyte !== o) hdr_bad = hdr_bad + 1;
+	end
+	if (c && l && !h && hdmi_osd.pix.pbyte !== o) shd_n = shd_n + 1;
+end
+
+`ifdef MENU_CORE
+integer f;
+initial begin
+	repeat (4) @(negedge clk);
+	$display("-- MENU_CORE: the header rows never read the shadow");
+	for (r = 0; r < 19; r = r + 1) spi_osd_row(r, 3);
+	for (r = 0; r < 16; r = r + 1) lw_row(r, 3);
+	axi_write(OSD + 21'h1000, 32'h1, 4'hF);    // LWSEL, no HR: 64 + 24 header lines fit the tb's 140
+	spi_osd_cmd(8'h40);                        // clears the highres rows 8-15 re-armed
+	spi_osd_cmd(8'h41);
+	f = cap_h.frames;
+	wait (cap_h.frames >= f + 4);
+	$display("     header pixel steps %0d, shadow-differing steps %0d (ce %0d, lwsel %0d)", hdr_n, shd_n, c_n, l_n);
+	check("header steps with LWSEL seen", hdr_n > 0, 1);
+	check("the shadow was read elsewhere", shd_n > 0, 1);
+	check("header bytes all from osd_buffer", hdr_bad, 0);
+	$display("%s: %0d checks, %0d failures", fails ? "FAILED" : "PASSED", checks, fails);
+	$finish;
+end
+`else
 initial begin
 	repeat (4) @(negedge clk);
 
@@ -528,13 +620,19 @@ initial begin
 	for (i = 2; i < 8; i = i + 1) rd("e0 bitmap wN", 21'h40020 + 4*i, 32'd0);
 	for (i = 0; i < 4; i = i + 1) rd("e0 reserved", 21'h40040 + 4*i, 32'd0);
 	rd("e1 kind SECTOR", 21'h40050, 32'd2);
-	rd("e1 version",     21'h40054, 32'h00010000);
+	rd("e1 version 1.1", 21'h40054, 32'h00010001);
 	rd("e1 offset",      21'h40058, 32'h00001000);
 	rd("e1 size",        21'h4005C, 32'h00002000);
 	rd("e1 slot/frame",  21'h40060, 32'h0100024C);
 	rd("e1 cause (abs)", 21'h40064, 32'h00041000);
 	rd("e1 depth/gap",   21'h40068, 32'h02000002);
-	for (i = 7; i < 16; i = i + 1) rd("e1 reserved", 21'h40050 + 4*i, 32'd0);
+	rd("e1 w7 card 1 slot/flags/frame", 21'h4006C, 32'h02030100);
+	rd("e1 w8 card 1 wsrc",             21'h40070, 32'h30100000);
+	rd("e1 w9 card 2 slot/flags/frame", 21'h40074, 32'h03030100);
+	rd("e1 w10 card 2 wsrc",            21'h40078, 32'h30200000);
+	rd("e1 w11 card 1 extent",          21'h4007C, 32'h00020000);
+	rd("e1 w12 card 2 extent",          21'h40080, 32'h00020000);
+	for (i = 13; i < 16; i = i + 1) rd("e1 reserved", 21'h40050 + 4*i, 32'd0);
 	rd("e2 kind OSDBUF", 21'h40090, 32'd3);
 	rd("e2 version",     21'h40094, 32'h00010000);
 	rd("e2 offset",      21'h40098, 32'h00004000);
@@ -620,7 +718,7 @@ initial begin
 
 
 	$display("-- SECTOR block: registers");
-	rd("ID SEC1", SEC + 21'h38, 32'h31434553);
+	rd("ID SEC2", SEC + 21'h38, 32'h32434553);
 	rd("CTRL reset", SEC + 21'h10, 32'd0);
 	rd("STATUS idle", SEC + 21'h14, 32'd0);
 	rd("REQ idle", SEC + 21'h04, 32'd0);
@@ -639,7 +737,7 @@ initial begin
 	settle;
 	check("doorbell raised", doorbell, 1);
 	check("SPI slot 1 offered while EN=0", sd_rd[1], 1);
-	rd("REQ pending + sdstat", SEC + 21'h04, 32'h800080C5);
+	rd("REQ hides a request whose EN is 0", SEC + 21'h04, 32'd0);
 	rd("LBA captured", SEC + 21'h08, 32'h00001234);
 	rd("GEN +1", SEC + 21'h24, dg(gen0 + 1));
 	rsize = 0; rd("CAUSE byte read: data", SEC + 21'h00, 32'h000180C5); rsize = 2;
@@ -647,8 +745,9 @@ initial begin
 	rd("CAUSE word read: BLK tag + 0x80C5", SEC + 21'h00, 32'h000180C5);
 	check("word read clears the line", doorbell, 0);
 	rd("CAUSE zero iff idle", SEC + 21'h00, 32'd0);
-	rd("REQ is a level (still pending)", SEC + 21'h04, 32'h800080C5);
 	sec_wr(21'h10, 32'h1); settle;
+	rd("REQ is a level (pending once EN)", SEC + 21'h04, 32'h800080C5);
+	rd("LBA_S[1] aliases LBA", SEC + 21'h64, 32'h00001234);
 	rd("STATUS en_sys", SEC + 21'h14, 32'h00000001);
 	check("SPI slot 1 hidden while en_sys", sd_rd[1], 0);
 
@@ -722,7 +821,7 @@ initial begin
 	check("STATUS high-water saturates at 255", d[15:8], dg(255));
 	rd("CAUSE pending, clk_sys stopped", SEC + 21'h00, 32'h000180C5);
 	check("CAUSE read clears with clk_sys stopped", doorbell, 0);
-	rd("ID, clk_sys stopped", SEC + 21'h38, 32'h31434553);
+	rd("ID, clk_sys stopped", SEC + 21'h38, 32'h32434553);
 	rd("undecoded, clk_sys stopped", 21'h1FFFFC, 32'hDEADBEEF);
 	sys_run = 1;
 	repeat (8000) @(negedge clk);
@@ -833,6 +932,134 @@ initial begin
 	wait_frame(n0);
 	check_buf("frame 0x2000 over SPI through the mux", 32'h00002000, 588);
 
+	$display("-- memory cards: EN=0 leaves both cards on hps_io");
+	axi_read(SEC + 21'h00, 0, d, dl, beats);           // clears the CD's pending cause
+	n0 = mc1.done; s0 = mc1.strobes;
+	mc1.go(0, 7'h05); settle;
+	check("card 1 rd offered to hps_io", sd_rd[2], 1);
+	check("card EN=0: no doorbell", doorbell, 0);
+	rd("card EN=0: REQ idle", SEC + 21'h04, 32'd0);
+	spi_sector(16'h0217, 512, 16'h3100, 3);
+	repeat (50) @(negedge clk_sys);
+	check("card 1 SPI read completed", mc1.done - n0, 1);
+	check("card 1 SPI took 512 strobes", mc1.strobes - s0, 512);
+	bad = 0; for (i = 0; i < 512; i = i + 1) if (mc1.ram[i] !== 16'h3100 + i) bad = bad + 1;
+	check("card 1 SPI buffer", bad, 0);
+
+	$display("-- memory cards: CTRL enables (CD bit 0, card 1 bit 6, card 2 bit 7)");
+	sec_wr(21'h10, 32'hC1); settle;
+	rd("CTRL readback EN mask", SEC + 21'h10, 32'h000000C1);
+
+	$display("-- card 1 READ over LW");
+	n0 = mc1.done; s0 = mc1.strobes; r = cd_strobes;
+	mc1.go(0, 7'h12); settle;
+	check("card 1 hidden from hps_io", sd_rd[2], 0);
+	check("card rd rings", doorbell, 1);
+	rd("CAUSE names card 1 read", SEC + 21'h00, 32'h000180C9);
+	rd("REQ card 1 read", SEC + 21'h04, 32'h800080C9);
+	rd("LBA_S[2]", SEC + 21'h68, 32'h00000012);
+	rd("LBA_S[0] reads 0", SEC + 21'h60, 32'd0);
+	sec_wr(21'h48, 32'h00000012);
+	rd("REQ hides the answered read", SEC + 21'h04, 32'd0);
+	frame_data(32'h00000012, 0, 256);
+	rd("ACCEPT ok, 256", SEC + 21'h18, 32'h80000100);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame done", mc1.done - n0, 1);
+	check("card 1 took 512 strobes", mc1.strobes - s0, 512);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h12, i)) bad = bad + 1;
+	check("card 1 buffer byte-exact (1 KB)", bad, 0);
+	check("cd_top saw no card strobe", cd_strobes - r, 0);
+	rd("REQ idle after the frame", SEC + 21'h04, 32'd0);
+
+	$display("-- card 2 WRITE answered by WACK");
+	n0 = mc2.done; s0 = mc2.strobes; r = mc1.strobes;
+	mc2.go(1, 7'h7F); settle;
+	check("card 2 wr hidden from hps_io", sd_wr[3], 0);
+	rd("CAUSE names card 2 write", SEC + 21'h00, 32'h000180CE);
+	rd("REQ card 2 write", SEC + 21'h04, 32'h800080CE);
+	rd("LBA_S[3]", SEC + 21'h6C, 32'h0000007F);
+	sec_wr(21'h5C, 32'h0000007F);
+	rd("ACCEPT ok after a WACK (length 0)", SEC + 21'h18, 32'h80000000);
+	repeat (100) @(negedge clk_sys);
+	check("card 2 write acked", mc2.done - n0, 1);
+	check("WACK puts no strobe on card 2", mc2.strobes - s0, 0);
+	check("nor on card 1", mc1.strobes - r, 0);
+	rd("REQ idle after the WACK", SEC + 21'h04, 32'd0);
+
+	$display("-- CD first: CD and card 1 pending together");
+	n0 = cd_frames; s0 = mc1.strobes; r = mc1.done;
+	fork
+		cd_request(32'h00003000);
+		mc1.go(0, 7'h20);
+	join
+	settle;
+	rd("REQ: the CD first", SEC + 21'h04, 32'h800080C5);
+	rd("CAUSE: the CD first", SEC + 21'h00, 32'h000180C5);
+	sec_wr(21'h44, 32'h00003000);                          // BEGIN_S[1] aliases BEGIN
+	rd("REQ: answered CD hidden, card 1 next", SEC + 21'h04, 32'h800080C9);
+	frame_data(32'h00003000, 0, 588);
+	rd("ACCEPT ok, 588", SEC + 21'h18, 32'h8000024C);
+	wait_frame(n0);
+	check_buf("CD frame 0x3000", 32'h00003000, 588);
+	check("the CD frame put no strobe on card 1", mc1.strobes - s0, 0);
+	n0 = cd_strobes;
+	sec_wr(21'h48, 32'h00000020);
+	frame_data(32'h00000020, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame after the CD", mc1.done - r, 1);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h20, i)) bad = bad + 1;
+	check("card 1 buffer after the CD", bad, 0);
+	check("the card frame put no strobe on cd_top", cd_strobes - n0, 0);
+
+	$display("-- stale and mismatched card answers rejected");
+	r = mc1.done; s0 = mc1.strobes;
+	mc1.go(0, 7'h21); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000099); settle;
+	axi_read(SEC + 21'h14, 0, d, dl, beats);
+	check("STATUS rejecting after a stale BEGIN_S", d[3:1], 3'b100);
+	sec_wr(21'h58, 32'h00000021); settle;                   // WACK for a READ request
+	axi_read(SEC + 21'h14, 0, d, dl, beats);
+	check("STATUS rejecting after a WACK on a read", d[3:1], 3'b100);
+	sec_wr(21'h5C, 32'h00000021); settle;                   // a slot with no request
+	check("no card strobe, no ack", mc1.strobes - s0 + mc1.done - r, 0);
+	sec_wr(21'h48, 32'h00000021);
+	frame_data(32'h00000021, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame after the rejects", mc1.done - r, 1);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h21, i)) bad = bad + 1;
+	check("card 1 buffer after the rejects", bad, 0);
+
+	$display("-- reset mid card frame zero-fills");
+	s0 = mc1.strobes;
+	mc1.go(0, 7'h22); settle;
+	sec_wr(21'h48, 32'h00000022);
+	frame_data(32'h00000022, 0, 100);
+	repeat (600) @(negedge clk_sys);
+	@(negedge clk_sys) cd_reset = 1;
+	repeat (4) @(negedge clk_sys);
+	cd_reset = 0;
+	repeat (1500) @(negedge clk_sys);
+	check("the fill completed 512 strobes", mc1.strobes - s0, 512);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== ((i < 100) ? pat(32'h22, i) : 32'd0)) bad = bad + 1;
+	check("card 1: 100 words then zeros", bad, 0);
+	axi_read(SEC + 21'h14, 0, d, dl, beats);
+	check("STATUS idle after the card fill", d[3:1], 3'b000);
+
+	$display("-- card EN off: back to hps_io, no doorbell");
+	sec_wr(21'h10, 32'h1); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	n0 = mc2.done; s0 = mc2.strobes;
+	mc2.go(1, 7'h44); settle;
+	check("card 2 wr offered to hps_io", sd_wr[3], 1);
+	check("no doorbell for a disabled card", doorbell, 0);
+	rd("REQ idle for a disabled card", SEC + 21'h04, 32'd0);
+	spi_sector(16'h0318, 512, 16'h0, 3);                   // the stock save drain, hps_io reads the buffer
+	repeat (50) @(negedge clk_sys);
+	check("card 2 SPI write completed", mc2.done - n0, 1);
+	check("SPI write: no strobe into card 2", mc2.strobes - s0, 0);
+	sec_wr(21'h10, 32'h0); settle;
+
 	$display("-- OSDBUF: registers");
 	rd("OSD ID OSD1", OSD + 21'h1004, 32'h3144534F);
 	rd("OSD CTRL reset", OSD + 21'h1000, 32'd0);
@@ -913,7 +1140,7 @@ initial begin
 		axi_read(SEC + 21'h14, 0, d, dl, beats);
 		check("lean STATUS[31:4]", d[31:4], 0);
 		for (i = 7; i < 14; i = i + 1) rd("lean SECTOR reg", SEC + 4*i, 32'd0);
-		rd("lean ID kept", SEC + 21'h38, 32'h31434553);
+		rd("lean ID kept", SEC + 21'h38, 32'h32434553);
 	end
 
 	$display("fixed latency: BVALID %0d cycles after AWVALID, RVALID %0d cycles after ARVALID", wlat_ref, rlat_ref);
@@ -921,6 +1148,7 @@ initial begin
 	         fails ? "FAILED" : "PASSED", checks, checks - lchecks, lchecks, fails);
 	$finish;
 end
+`endif
 
 initial begin #200000000 $display("FAILED: timeout"); $finish; end
 
