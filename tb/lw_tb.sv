@@ -1091,6 +1091,54 @@ initial begin
 	check("the older answer's reject rang nothing", doorbell, 0);
 	rd("REQ idle", SEC + 21'h04, 32'd0);
 
+	$display("-- the card's LBA moves while its request stays high: the reject re-latches it");
+	r = mc1.done;
+	mc1.go(0, 7'h40); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	rd("LBA_S[2] 0x40", SEC + 21'h68, 32'h00000040);
+	@(negedge clk_sys) mc1.lba = 7'h41;                     // rd never fell
+	settle;
+	rd("LBA_S[2] still the latched 0x40", SEC + 21'h68, 32'h00000040);
+	sec_wr(21'h48, 32'h00000040); settle;                   // answers the LBA it was shown
+	check("the moved LBA's answer re-rings", doorbell, 1);
+	rd("REQ shows card 1 again", SEC + 21'h04, 32'h800080C9);
+	rd("LBA_S[2] re-latched 0x41", SEC + 21'h68, 32'h00000041);
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000041);
+	frame_data(32'h00000041, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame at 0x41", mc1.done - r, 1);
+	bad = 0; for (i = 0; i < 256; i = i + 1) if ({mc1.ram[2*i+1], mc1.ram[2*i]} !== pat(32'h41, i)) bad = bad + 1;
+	check("card 1 buffer 0x41", bad, 0);
+	rd("REQ idle after the moved LBA", SEC + 21'h04, 32'd0);
+	check("no ring left after the moved LBA", doorbell, 0);
+
+	$display("-- a card's reject re-opens that slot only: the CD answered behind it stays hidden");
+	r = mc1.done; s0 = mc2.done; n0 = cd_frames;
+	mc1.go(0, 7'h70);
+	mc2.go(0, 7'h10);
+	cd_request(32'h00006000); settle;
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sys_run = 0;                                            // every answer queues before the feeder runs
+	sec_wr(21'h48, 32'h00000071);                           // card 1, the wrong LBA: rejected first
+	sec_wr(21'h4C, 32'h00000010);                           // card 2, right: its frame holds the feeder
+	frame_data(32'h00000010, 0, 256);
+	sec_wr(21'h0C, 32'h00006000);                           // the CD, right, behind card 2
+	sys_run = 1; repeat (40) @(negedge clk_sys);            // the reject is in; card 2 still streams
+	rd("REQ shows card 1, not the answered CD", SEC + 21'h04, 32'h800080C9);
+	repeat (1500) @(negedge clk_sys);
+	check("card 2 frame at 0x10", mc2.done - s0, 1);
+	frame_data(32'h00006000, 0, 588);
+	wait_frame(n0);
+	check_buf("CD buffer 0x6000 behind the card's reject", 32'h00006000, 588);
+	axi_read(SEC + 21'h00, 0, d, dl, beats);
+	sec_wr(21'h48, 32'h00000070);
+	frame_data(32'h00000070, 0, 256);
+	repeat (1500) @(negedge clk_sys);
+	check("card 1 frame at 0x70", mc1.done - r, 1);
+	rd("REQ idle after all three", SEC + 21'h04, 32'd0);
+	check("no ring left after all three", doorbell, 0);
+
 	$display("-- card EN off: back to hps_io, no doorbell");
 	sec_wr(21'h10, 32'h1); settle;
 	axi_read(SEC + 21'h00, 0, d, dl, beats);

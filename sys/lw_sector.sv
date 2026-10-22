@@ -106,11 +106,11 @@ reg   [7:0] hw = 0;
 reg   [7:0] n_rej = 0, n_skip = 0, n_abort = 0, n_rfill = 0;
 reg  [19:0] sum = 0;
 
-// clk_sys -> clk_100m: request levels, status bits, event toggles, per-slot reject toggle + tag
-wire [19:0] sys_bits;
-`SYNC reg [19:0] sb0 = 0;
-`SYNC reg [19:0] sb1 = 0;
-reg  [19:0] sb2 = 0;
+// clk_sys -> clk_100m: request levels, status bits, event toggles, the rejected answer's {tag, slot}
+wire [16:0] sys_bits;
+`SYNC reg [16:0] sb0 = 0;
+`SYNC reg [16:0] sb1 = 0;
+reg  [16:0] sb2 = 0;
 wire        req_s = sb1[0];
 wire        req_rise = sb1[0] & ~sb2[0];
 wire  [3:0] st_s = sb1[4:1];          // {rejecting, streaming, ack, en_sys}
@@ -119,8 +119,9 @@ wire  [1:0] xrd_s = {sb1[12], sb1[10]};
 wire  [1:0] xwr_s = {sb1[13], sb1[11]};
 wire  [1:0] xreq_s = xrd_s | xwr_s;
 wire  [1:0] xrise  = xreq_s & ~({sb2[13], sb2[11]} | {sb2[12], sb2[10]});
-wire  [2:0] rjev   = sb1[16:14] ^ sb2[16:14];   // the feeder rejected a BEGIN/WACK of that slot
-wire  [2:0] rjtag  = sb1[19:17];                // ... carrying this tag (stable a clk_sys cycle before)
+wire  [1:0] rjslot = sb1[15:14];   // the rejected BEGIN/WACK's slot and tag: stable a clk_sys cycle
+wire        rjtag  = sb1[16];      // before ev[0] (the reject toggle, synced in every build) moves
+wire  [2:0] rjsel  = (rjslot == 2'd0) ? 3'b001 : (rjslot == 2'd1) ? 3'b010 : (rjslot == 2'd2) ? 3'b100 : 3'b000;
 wire  [2:0] cand   = {xreq_s & xen, req_s & en} & ~ans;
 wire        any    = |cand;
 wire  [1:0] pick   = cand[0] ? 2'd0 : cand[1] ? 2'd1 : 2'd2;
@@ -151,7 +152,8 @@ wire        rd_cause = rreg && raddr[6:2] == 5'h00 && rd_word;
 wire  [2:0] bent  = {b_x1, b_x0, b_p} & {3{fwe}};
 wire  [2:0] reqs  = {xreq_s, req_s};
 // a reject of the LATEST answer re-opens the request: REQ shows it again and the doorbell re-rings
-wire  [2:0] unans = ans & rjev & ~(rjtag ^ btag) & ~bent;
+wire        rjlast = (rjtag == ((rjslot == 2'd0) ? btag[0] : (rjslot == 2'd1) ? btag[1] : btag[2]));
+wire  [2:0] unans = ans & rjsel & {3{ev[0] & rjlast}} & ~bent;
 wire        fire  = req_rise | |(xrise & xen) | |(unans & reqs & {xen, en});
 wire        clr_c = (rd_cause & rd_ack & (gen[3:0] == snap)) | w_cause;
 wire        push  = w_begin | w_abort | wdat;
@@ -173,9 +175,10 @@ always @(posedge clk) begin
 	// doorbell: the request rise raises, a raise beats a concurrent clear
 	gen     <= gen + fire;
 	pending <= fire | (pending & ~clr_c);
-	if (req_rise) lba <= c_lba;       // stable while the request is open
-	if (xrise[0]) xlba[6:0]  <= x_lba[6:0];
-	if (xrise[1]) xlba[13:7] <= x_lba[13:7];
+	// latched at the rise, and again when a reject re-opens the request (its LBA may have moved)
+	if (req_rise | unans[0]) lba <= c_lba;
+	if (xrise[0] | unans[1]) xlba[6:0]  <= x_lba[6:0];
+	if (xrise[1] | unans[2]) xlba[13:7] <= x_lba[13:7];
 	// answered: a BEGIN/WACK for the slot entered the FIFO; it ends when the request falls or the
 	// feeder rejects that latest answer (a stale LBA after a core reset restarted the request)
 	ans  <= bent | (ans & reqs & ~unans);
@@ -287,9 +290,10 @@ wire       bmatch = (bs == 2'd0) ? (!bwk && en_sys && c_req && qd == c_lba) :
 
 always @(posedge clk_sys) q <= fram[rptr[AW-1:0]];
 
-reg  [2:0] rj = 0, rjt = 0, rjp = 0;   // reject toggle, its entry's tag, toggle due next cycle
+reg  [1:0] rjs = 0;                    // the last reject's slot and its entry's tag; evt[0] moves
+reg        rjt = 0, rjp = 0;           // one cycle after them (rjp)
 
-assign sys_bits = {rjt, rj, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt : 5'd0, fs == F_REJECT,
+assign sys_bits = {rjt, rjs, x_wr[1], x_rd[1], x_wr[0], x_rd[0], DIAG ? evt[4:1] : 4'd0, evt[0], fs == F_REJECT,
                    fs == F_STREAM || fs == F_FILL || fs == F_ACK, o_ack | |x_ack, en_sys, c_req};
 
 reg  [2:0] fack = 0;                // per-slot ack: {X1, X0, primary}
@@ -305,7 +309,7 @@ always @(posedge clk_sys) begin
 	rgray <= rptr ^ (rptr >> 1);
 
 	o_wr <= 0;
-	rj   <= rj ^ rjp;
+	if (rjp) evt[0] <= ~evt[0];
 	rjp  <= 0;
 
 	// each slot's mux follows its EN only while the feeder is off that slot and its SPI ack is low
@@ -354,12 +358,10 @@ always @(posedge clk_sys) begin
 					fs    <= F_ACK;
 				end
 				else begin
-					fs     <= F_REJECT;
-					evt[0] <= ~evt[0];
-					if (bs != 2'd3) begin
-						rjt[bs] <= btg;
-						rjp[bs] <= 1'b1;
-					end
+					fs  <= F_REJECT;
+					rjs <= bs;
+					rjt <= btg;
+					rjp <= 1'b1;
 				end
 			end
 			else if (qt == T_ABORT) fs <= F_IDLE;
