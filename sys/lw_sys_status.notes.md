@@ -40,3 +40,10 @@ are one capture; unequal, read again. SEQ makes the comparison immune to the 4-b
   CAUSE in any case; the kept bit makes the level honest too: the line stays up for a capture the
   read did not return. The bench sweeps 64 read offsets around a capture and checks that level;
   dropping either guard turns it RED.
+
+## Fit (RTL b91d7d7, Quartus 17.0.2 Lite, `PSX.qsf` aggressive routability)
+
+41,390 / 41,910 ALMs (+113 over f96fa5c's 41,277, inside the fitter's run-to-run noise of a few
+hundred), peak interconnect 81.8% (f96fa5c 79.4%). Only negative slack: HDMI `ascal` setup -0.649 ns
+(f96fa5c -0.469, stock -0.553; the scaler's own path). Worst hold +0.087 ns; the bridge clock
+(`h2f_user0_clk`) setup +1.447 ns. Bitstream `PSX_LWS34-b91d7d7.rbf`, md5 `a6070b8f`.
