@@ -94,6 +94,8 @@ wire [31:0] lw_rdata, lw_wdata;
 wire  [3:0] lw_be;
 wire [48:0] lw_pad;
 wire        doorbell;
+wire        sys_irq;
+wire [131:0] st_up;
 wire [34:0] blk_up;
 wire [18:0] blk_dn;
 wire [19:0] card_up;
@@ -116,8 +118,9 @@ lw_sys_window win
 	.clk(clk),
 	.lw_raddr(lw_raddr), .lw_ren(lw_ren), .lw_rd_ack(lw_rd_ack), .lw_rd_word(lw_rd_word), .lw_rdata(lw_rdata),
 	.lw_waddr(lw_waddr), .lw_write(lw_write), .lw_wdata(lw_wdata), .lw_be(lw_be),
-	.doorbell(doorbell),
+	.doorbell(doorbell), .sys_irq(sys_irq),
 	.clk_sys(clk_sys), .lw_pad(lw_pad), .blk_up(blk_up), .blk_dn(blk_dn), .card_up(card_up), .card_dn(card_dn),
+	.st_up(st_up),
 	.osd_we(osd_we), .osd_addr(osd_addr), .osd_data(osd_data), .osd_be(osd_be), .osd_ctrl(osd_ctrl)
 );
 
@@ -163,10 +166,11 @@ wire rvalid  = bridge.hps2fpga_light_weight.rvalid;
 wire rlast   = bridge.hps2fpga_light_weight.rlast;
 wire [31:0] rdata = bridge.hps2fpga_light_weight.rdata;
 
-// HPS_BUS as sys_top wires it: {blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
+// HPS_BUS as sys_top wires it: {st_up, card_up/dn, blk_up, blk_dn, lw_pad, ...}; the SPI side is driven by the tb (io_*)
 reg         io_enable = 0, io_strobe = 0;
 reg  [15:0] io_din = 0;
-wire [181:0] hps_bus;
+wire [313:0] hps_bus;
+assign st_up = hps_bus[313:182];
 assign card_up = {hps_bus[181:172], hps_bus[169:160]};
 assign {hps_bus[171:170], hps_bus[159:158], hps_bus[157:149]} = {card_dn[12:11], card_dn[10:9], card_dn[8:0]};
 assign blk_up = hps_bus[148:114];
@@ -203,10 +207,15 @@ assign sd_buff_din[1] = 0;
 assign sd_buff_din[2] = mc1.dout;
 assign sd_buff_din[3] = mc2.dout;
 
+// The core's status request (PSX.sv statusUpdate): a rising edge of st_set latches st_in.
+reg [127:0] st_in = 0;
+reg         st_set = 0;
+
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(hps_bus),
+	.status_in(st_in), .status_set(st_set),
 	.joystick_0(joy0), .joystick_1(joy1), .joystick_2(joy2), .joystick_3(joy3),
 	.joystick_l_analog_0(ana0), .joystick_l_analog_3(ana3),
 	.joystick_r_analog_0(rana0), .joystick_r_analog_3(rana3), .paddle_1(pdl1),
@@ -479,6 +488,41 @@ task spi_frame(input [31:0] lba);
 endtask
 
 // OSDBUF: the tb's models of the two images, the stores that fill them and the pixel-path check.
+localparam [20:0] SYSB = 21'h43000;
+reg [31:0] stf0, stf1;
+reg [127:0] stw;
+
+function [127:0] st_pat(input integer k);
+	st_pat = {32'hA5000000 ^ k, 32'h5A000000 + k, 32'h00C30000 | k, {k[23:0], 8'h3C}};
+endfunction
+
+// One core status request: st_in, then a rising edge of status_set (held one clk_sys, then dropped).
+// The last capture of the snapshot and the last CAUSE fetch, for the race sweep's level property.
+realtime t_cap = 0, t_fetch = 0;
+always @(posedge clk) begin
+	if (win.sys_status.capture) t_cap = $realtime;
+	if (win.sys_status.rd_cause && lw_ren) t_fetch = $realtime;
+end
+
+task st_req(input [127:0] v);
+	begin
+		@(negedge clk_sys); st_in = v; st_set = 1;
+		@(negedge clk_sys); st_set = 0;
+	end
+endtask
+
+// Main's seqlock read: STFLG, the four words, STFLG; the snapshot only when both STFLG words agree.
+task st_read(output [31:0] f0, output [31:0] f1, output [127:0] w);
+	begin
+		axi_read(SYSB + 21'h04, 0, f0, dl, beats);
+		axi_read(SYSB + 21'h08, 0, w[31:0], dl, beats);
+		axi_read(SYSB + 21'h0C, 0, w[63:32], dl, beats);
+		axi_read(SYSB + 21'h10, 0, w[95:64], dl, beats);
+		axi_read(SYSB + 21'h14, 0, w[127:96], dl, beats);
+		axi_read(SYSB + 21'h04, 0, f1, dl, beats);
+	end
+endtask
+
 localparam [20:0] OSD = 21'h44000;
 reg  [7:0] spi_img [0:4095];
 reg  [7:0] lw_img  [0:4095];
@@ -609,7 +653,7 @@ initial begin
 	$display("-- directory");
 	rd("magic",        21'h40000, 32'h31535953);
 	rd("dir version",  21'h40004, 32'h00010000);
-	rd("count",        21'h40008, 32'd3);
+	rd("count",        21'h40008, 32'd4);
 	rd("scratch reset",21'h4000C, 32'd0);
 	rd("e0 kind",      21'h40010, 32'd1);
 	rd("e0 version",   21'h40014, 32'h00010000);
@@ -639,6 +683,15 @@ initial begin
 	rd("e2 size",        21'h4009C, 32'h00002000);
 	rd("e2 geometry",    21'h400A0, 32'h00800100);
 	for (i = 5; i < 16; i = i + 1) rd("e2 reserved", 21'h40090 + 4*i, 32'd0);
+	rd("e3 kind SYS",    21'h400D0, 32'd4);
+	rd("e3 version",     21'h400D4, 32'h00010000);
+	rd("e3 offset",      21'h400D8, 32'h00003000);
+	rd("e3 size",        21'h400DC, 32'h00001000);
+	rd("e3 line ordinal 2 (f2h_irq[9])", 21'h400E0, 32'd2);
+	rd("e3 cause (abs)", 21'h400E4, 32'h00043000);
+	rd("e3 class tag SYS", 21'h400E8, 32'h00100000);
+	rd("e3 causes: STATUS", 21'h400EC, 32'h00000001);
+	for (i = 8; i < 16; i = i + 1) rd("e3 reserved", 21'h400D0 + 4*i, 32'd0);
 
 	$display("-- scratch");
 	axi_write(21'h4000C, 32'hA5A55A5A, 4'hF);
@@ -685,10 +738,10 @@ initial begin
 	$display("-- default responder");
 	rd("LW 0x000000", 21'h000000, 32'hDEADBEEF);
 	rd("below window", 21'h03FFFC, 32'hDEADBEEF);
-	rd("directory hole", 21'h0400D0, 32'hDEADBEEF);
+	rd("directory hole", 21'h040110, 32'hDEADBEEF);
 	rd("below SECTOR", 21'h040FFC, 32'hDEADBEEF);
-	rd("above SECTOR", 21'h043000, 32'hDEADBEEF);
-	rd("below OSDBUF", 21'h043FFC, 32'hDEADBEEF);
+	rd("above SECTOR: SYS CAUSE idle", 21'h043000, 32'd0);
+	rd("SYS block end", 21'h043FFC, 32'd0);
 	rd("above OSDBUF", 21'h046000, 32'hDEADBEEF);
 	rd("above window", 21'h0C0000, 32'hDEADBEEF);
 	rd("LW 0x1FFFFC", 21'h1FFFFC, 32'hDEADBEEF);
@@ -1175,6 +1228,90 @@ initial begin
 	check("card 2 SPI write completed", mc2.done - n0, 1);
 	check("SPI write: no strobe into card 2", mc2.strobes - s0, 0);
 	sec_wr(21'h10, 32'h0); settle;
+
+	$display("-- SYS: the status back-channel (hps_io 0x29) as a cause, a line and a snapshot");
+	rd("SYS ID STS1", SYSB + 21'h1C, 32'h31535453);
+	check("SYS line low at reset", sys_irq, 0);
+	rd("SYS CAUSE idle", SYSB, 32'd0);
+	rd("SYS STFLG at reset", SYSB + 21'h04, 32'h0000000A0);
+	st_req(st_pat(1));
+	settle;
+	check("SYS line raised by status_set", sys_irq, 1);
+	check("SECTOR line untouched", doorbell, 0);
+	rsize = 0; axi_read(SYSB, 0, d, dl, beats); rsize = 2;
+	check("SYS byte read returns the cause", d, 32'h00100001);
+	check("SYS byte read does not clear", sys_irq, 1);
+	rd("SYS CAUSE: tag SYS (bit 20), payload STATUS", SYSB, 32'h00100001);
+	check("SYS word read clears the line", sys_irq, 0);
+	rd("SYS CAUSE idle after the read", SYSB, 32'd0);
+	st_read(stf0, stf1, stw);
+	check("STFLG {seq 1, A, flag 1}", stf0, 32'h000100A1);
+	check("STFLG stable across the words", stf1, stf0);
+	check("snapshot words [31:0]", stw[31:0], st_pat(1) >> 0);
+	check("snapshot words [63:32]", stw[63:32], st_pat(1) >> 32);
+	check("snapshot words [95:64]", stw[95:64], st_pat(1) >> 64);
+	check("snapshot words [127:96]", stw[127:96], st_pat(1) >> 96);
+	rd("SYS register hole", SYSB + 21'h18, 32'd0);
+	rd("SYS past the registers", SYSB + 21'h400, 32'd0);
+
+	$display("-- SYS: the SPI 0x29 path answers the same flag and words (hps_io unchanged)");
+	begin : spi29
+		reg [15:0] w29 [0:8];
+		integer m;
+		@(negedge clk_sys); io_enable = 1;
+		for (m = 0; m < 9; m = m + 1) begin
+			io_din = (m == 0) ? 16'h0029 : 16'h0000; io_strobe = 1; @(negedge clk_sys); io_strobe = 0;
+			@(negedge clk_sys); w29[m] = hps_io.io_dout;
+		end
+		io_enable = 0; @(negedge clk_sys);
+		check("0x29 head {A, flag 1}", {16'd0, w29[0]}, 32'h000000A1);
+		bad = 0;
+		stw = st_pat(1);
+		for (m = 0; m < 8; m = m + 1) if (w29[m + 1] !== stw[16*m +: 16]) bad = bad + 1;
+		check("0x29 words equal the LW snapshot", bad, 0);
+	end
+	check("an SPI read raises no SYS cause", sys_irq, 0);
+
+	$display("-- SYS: requests at the fastest rate (every 2 clk_sys) coalesce to the last");
+	for (i = 2; i < 6; i = i + 1) st_req(st_pat(i));
+	settle;
+	check("SYS line raised once for the burst", sys_irq, 1);
+	rd("SYS CAUSE", SYSB, 32'h00100001);
+	check("cleared by one word read", sys_irq, 0);
+	st_read(stf0, stf1, stw);
+	check("STFLG flag 5 (the core's)", {stf0[7:4], stf0[3:0]}, {4'hA, hps_io.stflg});
+	check("STFLG stable", stf1, stf0);
+	check("snapshot is the last request", stw == st_pat(5), 1);
+
+	$display("-- SYS: a request racing the CAUSE read is never lost (offset sweep)");
+	begin : race
+		integer k, lost, kept;
+		lost = 0; kept = 0;
+		for (k = 0; k < 64; k = k + 1) begin
+			fork
+				begin #(k * 2); axi_read(SYSB, 0, d, dl, beats); end
+				st_req(st_pat(100 + k));
+			join
+			settle;
+			// a capture the read did not return is still pending: the line stays (or comes back) up
+			if (t_cap >= t_fetch) begin kept = kept + 1; if (!sys_irq) lost = lost + 1; end
+			// Main's drain: the snapshot after the CAUSE read; a capture it missed keeps the line up
+			st_read(stf0, stf1, stw);
+			if (!sys_irq && (stf0[3:0] !== hps_io.stflg || stw !== st_pat(100 + k))) lost = lost + 1;
+			if (sys_irq) axi_read(SYSB, 0, d, dl, beats);
+		end
+		check("no request lost across 64 offsets", lost, 0);
+		check("some captures landed after the fetch", kept > 0, 1);
+		check("line idle after the sweep", sys_irq, 0);
+	end
+
+	$display("-- SYS: a capture mid-read changes STFLG, so the seqlock retries");
+	axi_read(SYSB + 21'h04, 0, stf0, dl, beats);
+	st_req(st_pat(200));
+	settle;
+	axi_read(SYSB + 21'h04, 0, stf1, dl, beats);
+	check("STFLG moved across the capture", stf0 != stf1, 1);
+	rd("SYS CAUSE", SYSB, 32'h00100001);
 
 	$display("-- OSDBUF: registers");
 	rd("OSD ID OSD1", OSD + 21'h1004, 32'h3144534F);

@@ -572,6 +572,8 @@ cyclonev_hps_interface_peripheral_uart uart
 
 // f2h_irq[8] = pool line 1 (GIC SPI 48): the LW SECTOR doorbell, level-high (lw_sector.sv).
 wire        lw_doorbell;
+// f2h_irq[9] = pool line 2 (GIC SPI 49): the LW SYS cause, level-high (lw_sys_status.sv).
+wire        lw_sys_irq;
 
 // OSDBUF stores from lw_sys_window to both osd shadows.
 wire        lw_osd_we;
@@ -579,7 +581,7 @@ wire  [9:0] lw_osd_addr;
 wire [31:0] lw_osd_data;
 wire  [3:0] lw_osd_be;
 wire  [1:0] lw_osd_ctrl;
-wire [63:0] f2h_irq = {55'd0, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
+wire [63:0] f2h_irq = {54'd0, lw_sys_irq, lw_doorbell, 6'd0, video_sync, HDMI_TX_VS};
 cyclonev_hps_interface_interrupts interrupts
 (
 	.irq(f2h_irq)
@@ -1788,6 +1790,7 @@ wire [34:0] lw_blk_up;
 wire [18:0] lw_blk_dn;
 wire [19:0] lw_card_up;
 wire [12:0] lw_card_dn;
+wire [131:0] lw_st_up;
 
 hps_lw_bridge hps_lw_bridge
 (
@@ -1816,12 +1819,14 @@ lw_sys_window lw_sys_window
 	.lw_wdata(lw_wdata),
 	.lw_be(lw_be),
 	.doorbell(lw_doorbell),
+	.sys_irq(lw_sys_irq),
 	.clk_sys(clk_sys),
 	.lw_pad(lw_pad),
 	.blk_up(lw_blk_up),
 	.blk_dn(lw_blk_dn),
 	.card_up(lw_card_up),
 	.card_dn(lw_card_dn),
+	.st_up(lw_st_up),
 	.osd_we(lw_osd_we),
 	.osd_addr(lw_osd_addr),
 	.osd_data(lw_osd_data),
@@ -1833,7 +1838,7 @@ emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
-	.HPS_BUS({lw_card_up[19:10], lw_card_dn[12:11], lw_card_up[9:0], lw_card_dn[10:9], lw_card_dn[8:0],
+	.HPS_BUS({lw_st_up, lw_card_up[19:10], lw_card_dn[12:11], lw_card_up[9:0], lw_card_dn[10:9], lw_card_dn[8:0],
 				 lw_blk_up, lw_blk_dn, lw_pad, f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 

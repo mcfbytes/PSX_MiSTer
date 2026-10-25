@@ -5,7 +5,7 @@
 
 module lw_blk_mux
 (
-	inout  [181:0] HPS_BUS,
+	inout  [313:0] HPS_BUS,
 
 	input          reset,       // the consumer's reset: zero-fills an open LW frame
 	input          core_req,
@@ -38,7 +38,7 @@ endmodule
 
 module lw_card_mux #(parameter CARD = 0)
 (
-	inout  [181:0] HPS_BUS,
+	inout  [313:0] HPS_BUS,
 
 	input          core_rd,
 	input          core_wr,

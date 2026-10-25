@@ -1,9 +1,11 @@
-// LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR and OSDBUF blocks.
+// LW window declared by `SYS_LW_CAPS (emu_ports.vh): self-describing directory, PAD, SECTOR, OSDBUF and SYS blocks.
 // Bridge side runs on clk_100m with no reset. PAD stores park in per-op latest-wins slots (digital)
 // or a 16-deep FIFO (both analog ops, drop-and-count when full), both in one M10K; a toggle handshake
 // drains them round-robin to clk_sys. The SECTOR block (lw_sector.sv) serves the CD slot and both
 // memory-card slots; entry 1 words 7-12 declare each card slot, its DDR image base (wsrc) and extent.
 // OSDBUF decodes image stores and CTRL; the shadow RAMs live in each osd instance (osd.v).
+// SYS (lw_sys_status.sv) raises the status back-channel's cause on its own line; entry 3 declares
+// the line's pool ordinal, the CAUSE word, the class tag and the cause bits, so Main reads them here.
 // LW_DIAG=0 (shipping) compiles out SCRATCH (reads 0, writes ignored), the analog-drop count (reads 0)
 // and lw_sector's diagnostics; LW_DIAG=1 (rig builds) keeps them.
 
@@ -27,6 +29,7 @@ module lw_sys_window
 	input       [3:0] lw_be,
 
 	output            doorbell,     // SECTOR cause level -> f2h_irq[8]
+	output            sys_irq,      // SYS cause level -> f2h_irq[9]
 
 	input             clk_sys,
 	output reg [48:0] lw_pad = 0,   // {we, op[7:0], idx[7:0], data[31:0]} on clk_sys
@@ -34,6 +37,7 @@ module lw_sys_window
 	output     [18:0] blk_dn,       // {en_sys, ack, wr, data[15:0]} on clk_sys, to emu
 	input      [19:0] card_up,      // {card 2, card 1}, each {hps_ack, wr, rd, lba[6:0]} on clk_sys, from emu
 	output     [12:0] card_dn,      // {ack2, en_sys2, ack1, en_sys1, addr[8:0]} on clk_sys, to emu
+	input     [131:0] st_up,        // {stflg[3:0], status_req[127:0]} on clk_sys, from hps_io
 
 	output            osd_we,       // OSDBUF image store, clk_100m: word osd_addr of the 256x128 image
 	output      [9:0] osd_addr,
@@ -65,7 +69,12 @@ localparam [20:0] OSD_OFF  = 21'h04000;
 localparam [20:0] OSD_SIZE = 21'h02000;
 localparam [12:0] OSD_CTRL = 13'h1000;   // block-relative; the image is 0x0000-0x0FFF
 localparam [31:0] OSD_GEOM = {16'd128, 16'd256};
-localparam  [5:0] DIR_WORDS = 6'd52;      // header + 3 entries
+localparam [20:0] SYS_OFF  = 21'h03000;
+localparam [20:0] SYS_SIZE = 21'h01000;
+localparam  [7:0] SYS_LINE = 8'd2;        // pool ordinal 2 = f2h_irq[9] (GIC SPI 49)
+localparam [31:0] SYS_TAG  = 32'h0010_0000;   // the cause word's class tag: bit 20 = SYS
+localparam [31:0] SYS_CAUSES = 32'h0000_0001; // payload bits it raises: bit 0 = STATUS (0x29)
+localparam  [6:0] DIR_WORDS = 7'd68;      // header + 4 entries
 
 localparam [255:0] PAD_OPS = (256'd1 << 8'h02) | (256'd1 << 8'h03) |
                              (256'd1 << 8'h10) | (256'd1 << 8'h11) |
@@ -85,6 +94,9 @@ wire        r_sec = r_in && rwin >= SEC_OFF && rwin < SEC_OFF + SEC_SIZE;
 wire        w_sec = w_in && wwin >= SEC_OFF && wwin < SEC_OFF + SEC_SIZE;
 wire        r_osd = r_in && rwin >= OSD_OFF && rwin < OSD_OFF + OSD_SIZE;
 wire        w_osd = w_in && wwin >= OSD_OFF && wwin < OSD_OFF + OSD_SIZE;
+wire        r_sys = r_in && rwin >= SYS_OFF && rwin < SYS_OFF + SYS_SIZE;
+wire [20:0] rsys  = rwin - SYS_OFF;
+wire [31:0] sys_rdata;
 wire [12:0] rosd  = rwin[12:0];           // OSD_OFF is 8 KB aligned
 wire [12:0] wosd  = wwin[12:0];
 wire [20:0] wblk = wwin - PAD_OFF;
@@ -96,45 +108,54 @@ always @(*) begin
 	lw_rdata = 32'hDEADBEEF;
 	if (r_pad) lw_rdata = (DIAG && rwin == PAD_OFF + (21'h1A << 10)) ? adrop : 32'd0;
 	else if (r_sec) lw_rdata = sec_rdata;
+	else if (r_sys) lw_rdata = sys_rdata;
 	else if (r_osd) lw_rdata = (rosd == OSD_CTRL)       ? {30'd0, octrl} :
 	                           (rosd == OSD_CTRL + 13'd4) ? 32'h3144534F :   // "OSD1"
 	                           32'd0;
 	else if (r_in && rwin < {DIR_WORDS, 2'b00}) begin
-		case (rwin[7:2])
-			6'd0:  lw_rdata = 32'h31535953;          // "SYS1"
-			6'd1:  lw_rdata = 32'h00010000;
-			6'd2:  lw_rdata = 32'd3;
-			6'd3:  lw_rdata = DIAG ? scratch : 32'd0;
-			6'd4:  lw_rdata = 32'd1;                 // entry 0: kind PAD
-			6'd5:  lw_rdata = 32'h00010000;
-			6'd6:  lw_rdata = {11'd0, PAD_OFF};
-			6'd7:  lw_rdata = {11'd0, PAD_SIZE};
-			6'd8:  lw_rdata = PAD_OPS[ 31:  0];
-			6'd9:  lw_rdata = PAD_OPS[ 63: 32];
-			6'd10: lw_rdata = PAD_OPS[ 95: 64];
-			6'd11: lw_rdata = PAD_OPS[127: 96];
-			6'd12: lw_rdata = PAD_OPS[159:128];
-			6'd13: lw_rdata = PAD_OPS[191:160];
-			6'd14: lw_rdata = PAD_OPS[223:192];
-			6'd15: lw_rdata = PAD_OPS[255:224];
-			6'd20: lw_rdata = 32'd2;                 // entry 1: kind SECTOR
-			6'd21: lw_rdata = 32'h00010001;                 // minor 1: save slots (words 7-12)
-			6'd22: lw_rdata = {11'd0, SEC_OFF};
-			6'd23: lw_rdata = {11'd0, SEC_SIZE};
-			6'd24: lw_rdata = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
-			6'd25: lw_rdata = {11'd0, WIN_OFF + SEC_OFF};   // CAUSE, absolute LW (= the IRQ:BLK offset)
-			6'd26: lw_rdata = {16'd1 << SEC_AW, SEC_GAP};
-			6'd27: lw_rdata = {4'd0, MC_SLOT0, MC_FLAGS, 6'd0, MC_FRAME};
-			6'd28: lw_rdata = MC_WSRC0;
-			6'd29: lw_rdata = {4'd0, MC_SLOT1, MC_FLAGS, 6'd0, MC_FRAME};
-			6'd30: lw_rdata = MC_WSRC1;
-			6'd31: lw_rdata = MC_EXTENT;
-			6'd32: lw_rdata = MC_EXTENT;
-			6'd36: lw_rdata = 32'd3;                 // entry 2: kind OSDBUF
-			6'd37: lw_rdata = 32'h00010000;
-			6'd38: lw_rdata = {11'd0, OSD_OFF};
-			6'd39: lw_rdata = {11'd0, OSD_SIZE};
-			6'd40: lw_rdata = OSD_GEOM;              // {height, width} in pixels, 1 bit each
+		case (rwin[8:2])
+			7'd0:  lw_rdata = 32'h31535953;          // "SYS1"
+			7'd1:  lw_rdata = 32'h00010000;
+			7'd2:  lw_rdata = 32'd4;
+			7'd3:  lw_rdata = DIAG ? scratch : 32'd0;
+			7'd4:  lw_rdata = 32'd1;                 // entry 0: kind PAD
+			7'd5:  lw_rdata = 32'h00010000;
+			7'd6:  lw_rdata = {11'd0, PAD_OFF};
+			7'd7:  lw_rdata = {11'd0, PAD_SIZE};
+			7'd8:  lw_rdata = PAD_OPS[ 31:  0];
+			7'd9:  lw_rdata = PAD_OPS[ 63: 32];
+			7'd10: lw_rdata = PAD_OPS[ 95: 64];
+			7'd11: lw_rdata = PAD_OPS[127: 96];
+			7'd12: lw_rdata = PAD_OPS[159:128];
+			7'd13: lw_rdata = PAD_OPS[191:160];
+			7'd14: lw_rdata = PAD_OPS[223:192];
+			7'd15: lw_rdata = PAD_OPS[255:224];
+			7'd20: lw_rdata = 32'd2;                 // entry 1: kind SECTOR
+			7'd21: lw_rdata = 32'h00010001;                 // minor 1: save slots (words 7-12)
+			7'd22: lw_rdata = {11'd0, SEC_OFF};
+			7'd23: lw_rdata = {11'd0, SEC_SIZE};
+			7'd24: lw_rdata = {SEC_SLOT, 8'd0, 6'd0, SEC_FRAME};
+			7'd25: lw_rdata = {11'd0, WIN_OFF + SEC_OFF};   // CAUSE, absolute LW (= the IRQ:BLK offset)
+			7'd26: lw_rdata = {16'd1 << SEC_AW, SEC_GAP};
+			7'd27: lw_rdata = {4'd0, MC_SLOT0, MC_FLAGS, 6'd0, MC_FRAME};
+			7'd28: lw_rdata = MC_WSRC0;
+			7'd29: lw_rdata = {4'd0, MC_SLOT1, MC_FLAGS, 6'd0, MC_FRAME};
+			7'd30: lw_rdata = MC_WSRC1;
+			7'd31: lw_rdata = MC_EXTENT;
+			7'd32: lw_rdata = MC_EXTENT;
+			7'd36: lw_rdata = 32'd3;                 // entry 2: kind OSDBUF
+			7'd37: lw_rdata = 32'h00010000;
+			7'd38: lw_rdata = {11'd0, OSD_OFF};
+			7'd39: lw_rdata = {11'd0, OSD_SIZE};
+			7'd40: lw_rdata = OSD_GEOM;              // {height, width} in pixels, 1 bit each
+			7'd52: lw_rdata = 32'd4;                 // entry 3: kind SYS
+			7'd53: lw_rdata = 32'h00010000;
+			7'd54: lw_rdata = {11'd0, SYS_OFF};
+			7'd55: lw_rdata = {11'd0, SYS_SIZE};
+			7'd56: lw_rdata = {24'd0, SYS_LINE};     // the line: a 1-based pool ordinal, as IRQ: tokens
+			7'd57: lw_rdata = {11'd0, WIN_OFF + SYS_OFF};   // CAUSE, absolute LW
+			7'd58: lw_rdata = SYS_TAG;
+			7'd59: lw_rdata = SYS_CAUSES;
 			default: lw_rdata = 32'd0;
 		endcase
 	end
@@ -154,6 +175,15 @@ lw_sector #(.SLOT(SEC_SLOT), .FRAME(SEC_FRAME), .AW(SEC_AW), .DIAG(DIAG),
 	.x_hps_ack({card_up[19], card_up[9]}), .x_wr({card_up[18], card_up[8]}), .x_rd({card_up[17], card_up[7]}),
 	.x_lba({card_up[16:10], card_up[6:0]}),
 	.x_en_sys({card_dn[11], card_dn[9]}), .x_ack({card_dn[12], card_dn[10]})
+);
+
+lw_sys_status sys_status
+(
+	.clk(clk),
+	.raddr(rsys[9:0]), .rsel(r_sys && rsys < 21'h400), .ren(lw_ren), .rd_ack(lw_rd_ack), .rd_word(lw_rd_word),
+	.rdata(sys_rdata),
+	.irq(sys_irq),
+	.clk_sys(clk_sys), .stflg(st_up[131:128]), .status_req(st_up[127:0])
 );
 
 // OSDBUF: image stores go to both osd shadows (byte lanes honour BE); CTRL is {HR, LWSEL}.

@@ -35,7 +35,7 @@
 module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, BLKSZ=2, PS2WE=0, STRLEN=$size(CONF_STR)>>3, F12KEYMOD=0)
 (
 	input             clk_sys,
-	inout     [181:0] HPS_BUS,
+	inout     [313:0] HPS_BUS,
 
 	// buttons up to 32
 	output reg [31:0] joystick_0,
@@ -194,6 +194,11 @@ wire  [7:0] lw_idx   = HPS_BUS[85:78];
 wire [31:0] lw_dat   = HPS_BUS[77:46];
 reg  [15:0] io_dout;
 
+// The status back-channel's own flag and snapshot (0x29), exported to sys_top's LW SYS block.
+reg   [3:0] stflg = 0;
+reg [127:0] status_req = 0;
+assign HPS_BUS[313:182] = {stflg, status_req};
+
 assign HPS_BUS[37]   = ioctl_wait;
 assign HPS_BUS[36]   = clk_sys;
 assign HPS_BUS[32]   = io_wide;
@@ -275,8 +280,6 @@ always@(posedge clk_sys) begin : uio_block
 	reg  [3:0] stick_idx;
 	reg  [3:0] pdsp_idx;
 	reg        ps2skip = 0;
-	reg  [3:0] stflg = 0;
-	reg[127:0] status_req;
 	reg        old_status_set = 0;
 	reg        old_upload_req = 0;
 	reg        upload_req = 0;
