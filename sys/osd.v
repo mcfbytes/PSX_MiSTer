@@ -185,7 +185,11 @@ always @(posedge clk_video) if(ce_pix) begin
 	v_info_start_5 <= rot[0] ? (infox + (infox << 2)) : (infoy + (infoy << 2));
 end
 
-always @(posedge clk_video) begin : pix
+`ifdef LW_TB_PROBES
+always @(posedge clk_video) begin : pix   // named for the testbench's probes only (tb/lw_tb.sv)
+`else
+always @(posedge clk_video) begin   // unnamed, so sys_top.sdc's *_osd|<reg> patterns match
+`endif
 	reg        deD;
 	reg  [2:0] osd_div;
 	reg  [2:0] multiscan;

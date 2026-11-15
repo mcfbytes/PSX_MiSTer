@@ -131,7 +131,7 @@ wire [15:0] pst    = !any ? 16'd0 : pick == 2'd0 ? SDSTAT : pick == 2'd1 ? xst0 
 
 wire        rreg  = rsel & ~raddr[12] & ~|raddr[11:7];
 wire        wreg  = wsel & write & ~waddr[12] & ~|waddr[11:7] & &be;
-wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < FRAME);
+wire        wdat  = wsel & write &  waddr[12] & &be & (waddr[11:2] < flen_w);   // the OPEN frame's length
 wire  [4:0] widx  = waddr[6:2];
 wire  [3:0] ws    = {2'b00, waddr[3:2]};          // BEGIN_S/WACK_S slot number
 wire        w_cause = wreg && widx == 5'h00;
