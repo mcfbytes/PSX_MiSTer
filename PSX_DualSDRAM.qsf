@@ -65,7 +65,30 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
-# LW window diagnostics (sys/lw_sys_window.sv, sys/lw_sector.sv): 0 = shipping, 1 = rig builds
+# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io. Without MISTER_LW
+# sys/ and PSX.sv compile as stock. Tiers: pads, the status/event causes, the OSD image, and the SECTOR block
+# serving the CD (hps_io slot 1, one 2352-byte raw sector = 588 words a frame, BLKSZ 3) and both memory cards
+# (slots 2 and 3, 1 KB frames, 7-bit LBAs, images in DDR where psx_top's arbiter puts them). No frame lane.
+set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=588"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=3"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_SLOT=2"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_WSRC=32'h30100000"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_EXTENT=32'h00020000"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_LBA_BITS=7"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_SLOT=3"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_WSRC=32'h30200000"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_EXTENT=32'h00020000"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_FRAME=256"
+set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_LBA_BITS=7"
+
+# LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 = shipping, 1 = debug builds
 set_global_assignment -name VERILOG_MACRO "LW_DIAG=0"
 
 source sys/sys.tcl

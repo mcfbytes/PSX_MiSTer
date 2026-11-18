@@ -197,7 +197,7 @@ wire reset_or = RESET | buttons[1] | status[0] | bios_download | exe_download | 
 
 `include "build_id.v"
 parameter CONF_STR = {
-	"PSX;", `SYS_LW_CAPS, ",SS3E000000:400000;",
+	"PSX;", `SYS_LW_CAPS "SS3E000000:400000;",
 	"H7S1,CUECHD,Load CD;",
 	"h7-,Reload core for CD;",
 	"F1,EXE,Load Exe;",
@@ -897,36 +897,68 @@ end
 
 ////////////////////////////  SYSTEM  ///////////////////////////////////
 
-// CD sectors: hps_io slot 1, or the LW SECTOR block while sys_top enables it (sys/lw_blk_mux.sv)
+// CD sectors on hps_io slot 1, memory cards on slots 2 and 3. With the LW SECTOR block (PSX.qsf's
+// MISTER_LW_SECTOR_SLOT and save-slot macros) a mux per slot hands it to the block while the host's EN for the
+// slot is set (sys/lw_blk_mux.sv, docs/LW_BRIDGE.md "Hooking the SECTOR block"); without it the wiring is stock.
 wire        cd_req, cd_ack, cd_wr;
 wire [15:0] cd_data;
+wire        mc1_rd, mc1_wr, mc1_ack, mc1_write, mc2_rd, mc2_wr, mc2_ack, mc2_write;
+wire  [8:0] mc1_addr, mc2_addr;
+wire [15:0] mc1_din, mc2_din;
+`ifdef MISTER_LW_SECTOR_SLOT
 lw_blk_mux cd_lw
 (
    .HPS_BUS(HPS_BUS), .reset(reset),
-   .core_req(cd_req), .core_lba(sd_lba1), .core_ack(cd_ack), .core_wr(cd_wr), .core_data(cd_data),
-   .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_data(sd_buff_dout)
+   .core_req(cd_req), .core_lba(sd_lba1), .core_ack(cd_ack), .core_wr(cd_wr), .core_addr(), .core_data(cd_data),
+   .hps_req(sd_rd[1]), .hps_ack(sd_ack[1]), .hps_wr(sd_buff_wr), .hps_addr({5'd0, sd_buff_addr}),
+   .hps_data(sd_buff_dout)
 );
+`else
+assign sd_rd[1] = cd_req;
+assign cd_ack   = sd_ack[1];
+assign cd_wr    = sd_buff_wr;
+assign cd_data  = sd_buff_dout;
+`endif
 
-// memory cards: hps_io slots 2/3, or the LW SECTOR block per card while sys_top enables it
-wire       mc1_rd, mc1_wr, mc1_ack, mc1_write, mc2_rd, mc2_wr, mc2_ack, mc2_write;
-wire [8:0] mc1_addr, mc2_addr;
-wire [15:0] mc1_din, mc2_din;
-lw_card_mux #(.CARD(0)) mc1_lw
+`ifdef MISTER_LW_SAVE0_SLOT
+wire [13:0] mc1_addr_w;
+assign mc1_addr = mc1_addr_w[8:0];
+lw_save_mux #(.SAVE(0)) mc1_lw
 (
    .HPS_BUS(HPS_BUS),
-   .core_rd(mc1_rd), .core_wr(mc1_wr), .core_lba(sd_lba2), .core_ack(mc1_ack), .core_write(mc1_write),
-   .core_addr(mc1_addr), .core_data(mc1_din),
-   .hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+   .core_rd(mc1_rd), .core_wr(mc1_wr), .core_lba({25'd0, sd_lba2}), .core_ack(mc1_ack), .core_write(mc1_write),
+   .core_addr(mc1_addr_w), .core_data(mc1_din),
+   .hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr({5'd0, sd_buff_addr}),
    .hps_data(sd_buff_dout)
 );
-lw_card_mux #(.CARD(1)) mc2_lw
+`else
+assign sd_rd[2]  = mc1_rd;
+assign sd_wr[2]  = mc1_wr;
+assign mc1_ack   = sd_ack[2];
+assign mc1_write = sd_buff_wr;
+assign mc1_addr  = sd_buff_addr;
+assign mc1_din   = sd_buff_dout;
+`endif
+
+`ifdef MISTER_LW_SAVE1_SLOT
+wire [13:0] mc2_addr_w;
+assign mc2_addr = mc2_addr_w[8:0];
+lw_save_mux #(.SAVE(1)) mc2_lw
 (
    .HPS_BUS(HPS_BUS),
-   .core_rd(mc2_rd), .core_wr(mc2_wr), .core_lba(sd_lba3), .core_ack(mc2_ack), .core_write(mc2_write),
-   .core_addr(mc2_addr), .core_data(mc2_din),
-   .hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr(sd_buff_addr),
+   .core_rd(mc2_rd), .core_wr(mc2_wr), .core_lba({25'd0, sd_lba3}), .core_ack(mc2_ack), .core_write(mc2_write),
+   .core_addr(mc2_addr_w), .core_data(mc2_din),
+   .hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr({5'd0, sd_buff_addr}),
    .hps_data(sd_buff_dout)
 );
+`else
+assign sd_rd[3]  = mc2_rd;
+assign sd_wr[3]  = mc2_wr;
+assign mc2_ack   = sd_ack[3];
+assign mc2_write = sd_buff_wr;
+assign mc2_addr  = sd_buff_addr;
+assign mc2_din   = sd_buff_dout;
+`endif
 
 psx_mister
 psx

@@ -14,5 +14,3 @@ set_false_path -from {emu|pll2|pll2_inst|altera_pll_i|cyclonev_pll|counter[0].ou
 set_false_path -from {emu|pll2|pll2_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk} -to {pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk}
 set_false_path -from {emu|pll2|pll2_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk} -to {sysmem|fpga_interfaces|clocks_resets|h2f_user0_clk}
 set_false_path -from {emu|pll2|pll2_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk} -to {FPGA_CLK1_50}
-# LW OSDBUF CTRL.LWSEL (clk_100m) into each osd's two-flop synchroniser lwsel_v0 -> lwsel_v1 (one quasi-static bit)
-set_false_path -from [get_registers {*lw_sys_window|octrl[0]}] -to [get_registers {*|lwsel_v0}]
