@@ -1,0 +1,51 @@
+# MiSTer Seedy fan-out seed hunt for PSX on the seedy-rg Azure scale set (mcfbytes/PSX_MiSTer fork only).
+#
+# Start a hunt: push to this branch with "[seedy hunt]" in the head commit's message. Other pushes (including
+# this file's) start nothing, so nothing is billed by accident. A new push cancels a hunt still running.
+# Before pushing, scale the VMs up (they delete themselves 10 minutes after their last job):
+#   az vmss scale -g seedy-rg -n seedy-runners --new-capacity 16
+#
+# Sizing, measured 2026-11-25 (Seedy session): a PSX build peaks at 7.0 GiB. With the .qsf's
+# NUM_PARALLEL_PROCESSORS ALL, Quartus runs up to min(CPUs, 16) fitter threads, and those mostly spin when they
+# outnumber the vCPUs (4 builds on a D32as_v7: 29-37 min each, $0.22 per build; 16 builds on it never got through
+# placement). So the scale set runs 16 x D8as_v7 (8 vCPUs, 32 GB: the whole 128-vCPU Dasv7 quota) with
+# SEEDY_SLOTS=2: 32 builds at once, one job per VM. ALL on 8 CPUs builds the same bitstream as on 32
+# (Seedy docs/VALIDATION.md). If the first builds take more than ~80 min, set seedy_slots = 1 in the Terraform.
+#
+# Never set threads_per_compile or edit NUM_PARALLEL_PROCESSORS: it changes the fit, and seeds found here would
+# not hold for the release build.
+name: Seedy hunt
+
+on:
+  push:
+    branches: [seedy-hunt]
+
+permissions:
+  contents: read
+
+jobs:
+  seedy:
+    if: contains(github.event.head_commit.message, '[seedy hunt]')
+    concurrency:
+      group: seedy-hunt-${{ github.ref }}
+      cancel-in-progress: true
+    # what Seedy's jobs may ask for (as in its template); with override_seed never nothing is written
+    permissions:
+      contents: write
+      actions: read
+    uses: mcfbytes/Seedy_MiSTer/.github/workflows/seedy.yml@5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
+    with:
+      mode: hunt
+      project: PSX                # the fork also has PSX_DualSDRAM.qpf; Seedy can't pick one on its own
+      reference: shipped          # this commit's .qsf seed first, and main once at its seed, for comparison
+      seed_start: 1
+      max_seeds: 96               # 3 waves of 32
+      min_met: 16                 # each of the 16 jobs stops at its own share: ceil(16 / 16) = 1 closing seed
+      hunt_minutes: 480
+      jobs: "16"                  # one job per VM
+      per_job_concurrency: auto   # = SEEDY_SLOTS (2) on these VMs
+      runs_on: '["self-hosted", "linux", "seedy-azure"]'
+      job_timeout_minutes: 600
+      keep_rbf: best
+      override_seed: never
+      seedy_ref: 5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
