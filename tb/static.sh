@@ -4,13 +4,16 @@
 #                           per failed check, then PASSED/FAILED with the counts (tb/run.sh's verdict)
 #   tb/static.sh --configs  one "name|macros" line per configuration arm E elaborates: off and each of the 32 LW
 #                           tier sets of {PAD, EVT, SECTOR, LANE, OSD}, each with no upstream macro, with
-#                           MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM (99 configurations)
+#                           MISTER_DEBUG_NOHDMI and with MISTER_DUAL_SDRAM; and MISTER_OCRAM alone, with
+#                           MISTER_OCRAM_DIAG, with MISTER_OCRAM_OSD, with both, and beside every LW tier (with
+#                           and without the OSD tier), each with no upstream macro and with MISTER_DEBUG_NOHDMI
+#                           (111 configurations)
 #   tb/static.sh --nets FILE MACRO...
 #                           FILE gets one Verilog check call per LW net of that configuration, for tb/top_tb.sv
-# An LW net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
-# same upstream variant does not have word for word (the LW wires, and every stock net the LW text re-declares,
-# such as the link nets the lane takes over), and every port of osd, hps_io and emu that the configuration
-# declares differently from off, at each of their instances. Arm E fails if one of them reads z.
+# A floor net is a net sys_top.v declares in this configuration whose declaration the off configuration of the
+# same upstream variant does not have word for word (the LW wires, the OCRAM bundle's, and every stock net a
+# floor's text re-declares, such as the link nets the lane takes over), and every port of osd, hps_io and emu
+# that the configuration declares differently from off, at each of their instances. Arm E fails if one reads z.
 # The checks, each in every configuration, on sys_top.v as Icarus preprocesses it:
 #   1. The LW terms of GPI and the two LW instances come together or not at all: gp_in[25] is the net lw_present,
 #      gp_in[24] the net lw_idle and gp_in[22] the net lw_held in exactly the configurations that instantiate both
@@ -19,15 +22,20 @@
 #      idle, the window's held). Every other bit of gp_in[27:21] is a constant 0 (all of them without MISTER_LW),
 #      and gp_in is 32 bits wide. Once, in hps_lw_bridge.sv: present is assigned the constant 1 and nothing else,
 #      and idle is lw_axi_regbus's idle_q, a register assigned only on posedge clk. Once, in lw_sys_window.sv
-#      (check 8): held is en_q alone, a register assigned only on posedge clk.
+#      (check 8): held is en_q alone, a register assigned only on posedge clk. Under MISTER_OCRAM, gp_in[26] is
+#      the net ocram_present in exactly those configurations and 0 otherwise, declared with no value, assigned
+#      nowhere, connected to hps_ocram_master.present; that module's present is the constant 1 alone once.
 #   2. f2h_irq: bits 1:0 are upstream's; bits 10:8 are the 3-bit net lw_sys_window's lines output drives, line
 #      ordinal k at bit 7+k, declared with no value and assigned nowhere else; every other bit is a constant 0.
-#   3. Every LW configuration has LW nets to check; the off configuration has none.
-# Then, once, the crossing structure, on every LW-only file and the LW text of the stock files, with every tier:
+#      Under MISTER_OCRAM, bit 11 is the net ocram_line in exactly those configurations and 0 otherwise,
+#      connected to hps_ocram_master.line, a register assigned only on posedge clk.
+#   3. Every floor configuration has floor nets to check; the off configuration has none.
+# Then, once, the crossing structure, on every framework-only file (hps_lw_*, lw_*, hps_ocram_*) and the
+# floors' text of the stock files, with every tier:
 #   4. The cell registers (lws0_, lws1_, lwa0_, lwa1_, lwq_, lwsrc_, lwtg_) are named only in sys/lw_cdc.sv, and
 #      the synchroniser attribute is on its two-flop stages alone (SYNC_ALLOW lists no exception).
 #      lw_qstat is built only inside lw_xfer, whose capture enable comes from no lwsrc_ register and whose D is
-#      its hold register; an lw_arst input is hps_rst_n or gp_out[31].
+#      its hold register; an lw_arst input is hps_rst_n or a gp_out bit (31, 28, 27 or 26).
 #   5. The D of every lw_sync is a plain reference (names, selects, a concatenation of them) to registers of the
 #      same module, clocked there and not on the destination clock, named *_lwx (GRAY 0) or *_lwgray (GRAY 1),
 #      each declared with a preserve attribute (in lw_cdc.sv, also a cell's own toggles, and lw_arst's chain,
@@ -58,11 +66,16 @@
 #      enable-fall contract promises no queued frame, committed or not: only a frame already playing completes.
 # Then, once, the constraints, sys/lw_bridge.sdc against the LW modules with every tier and LW_DIAG=1:
 #  10. Every set_net_delay and set_max_skew carries -from and -to, each a collection the file builds; every
-#      get_keepers name pattern (the Gray loop's expanded per bus) matches a register of an LW module, as a
-#      keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
+#      get_keepers or get_registers name pattern (the Gray loop's expanded per bus, its sources get_registers:
+#      17.0.2 ignores the keeper form there) matches a register of an LW module, as a keeper name <hierarchy>|<register>; the collection lw_x is exactly the registers that feed an lw_sync, and
 #      lw_s0, lw_a, lw_q and lw_src exactly the cells' first stages, asynchronous chain, bundle captures and
 #      hold registers. It prints the source bits into first stages and the bundle bits, per block at its
 #      default parameters (one instance each, every generate branch), for the post-fit pair count to compare.
+# Then, once, the OCRAM floor's addresses, in hps_ocram_master.sv with both OCRAM macros:
+#  11. Every araddr and awaddr is one assignment of {16'hFFFF, off_q}; off_q's one source is t_off; every t_off
+#      assignment is a control localparam (all below 0x100) or evt_off, whose one assignment is
+#      EVT_BASE + ((evt_index & (EVT_WORDS - 1)) << 2); EVT_BASE + 4*EVT_WORDS is below 0xF000. A new address
+#      form fails the check.
 # Needs Icarus Verilog (for its preprocessor) and python3.
 cd "$(dirname "$0")/.." || exit 2
 O=${LW_TB_OUT:-tb/out}/static; mkdir -p "$O" || exit 2
@@ -80,11 +93,32 @@ TIERS = [('off', [])] + [('-'.join(['lw'] + [n for k, (n, _) in enumerate(TIER_M
 VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI']), ('.dual', ['MISTER_DUAL_SDRAM'])]
 UPSTREAM = {'MISTER_DEBUG_NOHDMI', 'MISTER_DUAL_SDRAM'}
 CONFIGS = [(t + v, td + vd) for v, vd in VARIANTS for t, td in TIERS]
+# the OCRAM floor's configurations: alone, with the diagnostic counters, with the OSD tier, with both, and
+# beside every LW tier (with and without the OSD tier)
+OCRAM_TIERS = [('ocram', ['MISTER_OCRAM']),
+               ('ocram-diag', ['MISTER_OCRAM', 'MISTER_OCRAM_DIAG']),
+               ('ocram-osd', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD']),
+               ('ocram-osd-diag', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_DIAG']),
+               ('ocram-lw-all', ['MISTER_OCRAM', 'MISTER_LW'] + [d for _, d in TIER_MACROS]),
+               ('ocram-osd-lw-all', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_LW'] +
+                                    [d for _, d in TIER_MACROS]),
+               # the SECTOR tier needs MISTER_LW (its HPS_BUS bits) and excludes the LW SECTOR block and DIAG
+               ('ocram-sec-lw', ['MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=1', 'MISTER_LW']),
+               ('ocram-osd-sec-lw-pad', ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=2',
+                                         'MISTER_OCRAM_SECTOR_FRAME=588', 'MISTER_OCRAM_BLKSZ=3', 'MISTER_LW',
+                                         'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_OSD', 'MISTER_DISABLE_SPI_PAD'])]
+OCRAM_VARIANTS = [('', []), ('.nohdmi', ['MISTER_DEBUG_NOHDMI'])]
+CONFIGS += [(t + v, td + vd) for t, td in OCRAM_TIERS for v, vd in OCRAM_VARIANTS]
 # f2h_irq bits -> the lw_sys_window output that must drive them, its bit k-1 being line ordinal k at bit 7+k
 LINES_LO, LINES_W, LINES_PORT = 8, 3, 'lines'
 # gp_in bit -> (the net, the instance and its output that must drive it); the rest of gp_in[27:21] is 0
 GPI = {25: ('lw_present', 'hps_lw_bridge', 'present'), 24: ('lw_idle', 'hps_lw_bridge', 'idle'),
        22: ('lw_held', 'lw_sys_window', 'held')}
+# the EVT ring's line: framework ordinal 4 -> f2h_irq[7 + 4], the master's line output
+OCRAM_LINE, OCRAM_LINE_PORT = 11, 'line'
+OCMACS = ['MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD']
+# the SECTOR tier's text (its REQUEST writer is the EVT writer of a build without DIAG)
+OCMACS_SEC = ['MISTER_OCRAM', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
 
 if args[:1] == ['--configs']:
     for n, d in CONFIGS:
@@ -292,6 +326,7 @@ def check(ok, what):
 
 def analyse(defs):
     lw = 'MISTER_LW' in defs
+    ocram = 'MISTER_OCRAM' in defs
     off = [d for d in defs if d in UPSTREAM]
     top = module(tokens(pp('sys/sys_top.v', defs)), 'sys_top')
     top0 = module(tokens(pp('sys/sys_top.v', off)), 'sys_top')
@@ -308,7 +343,7 @@ def analyse(defs):
         host = top if path is None else module(tokens(pp('Template.sv', defs)), 'emu')
         for inst, _ in instances(host, mod):
             lwports += [('.'.join(x for x in (path, inst, p) if x)) for p in changed]
-    return lw, top, D, nets, lwports
+    return lw, ocram, top, D, nets, lwports
 
 def write_nets(path, nets, lwports):
     with open(path, 'w') as f:
@@ -320,21 +355,22 @@ def write_nets(path, nets, lwports):
 
 if args[:1] == ['--nets']:
     defs = [a[2:] for a in args[2:] if a.startswith('-D')]
-    _, _, _, nets, lwports = analyse(defs)
+    _, _, _, _, nets, lwports = analyse(defs)
     write_nets(args[1], nets, lwports)
     sys.exit(0)
 
 for name, defs in CONFIGS:
-    lw, top, D, nets, lwports = analyse(defs)
-    print('-- %s: the GPI terms, the lines and the LW nets (%s)' % (name, ' '.join(defs) or 'no macro'))
+    lw, ocram, top, D, nets, lwports = analyse(defs)
+    print('-- %s: the GPI terms, the lines and the floor nets (%s)' % (name, ' '.join(defs) or 'no macro'))
     W = {}
     for n, (_, rng, _) in D.items():
         W[n] = rng_width(rng) if rng else 1
     for p, txt in ports(top).items():
         t = txt.split()
         W[p] = rng_width(t[t.index('['):t.index(']') + 1]) if '[' in t else 1
-    inst = {m: instances(top, m) for m in ('hps_lw_bridge', 'lw_sys_window')}
+    inst = {m: instances(top, m) for m in ('hps_lw_bridge', 'lw_sys_window', 'hps_ocram_master')}
     fw, win = len(inst['hps_lw_bridge']) == 1, len(inst['lw_sys_window']) == 1
+    oc = inst['hps_ocram_master']
     gp = bitmap(D.get('gp_in', (0, 0, None))[2], W)
     if check(gp is not None and len(gp) == 32, '%s: gp_in is not a 32-bit concatenation of sized terms' % name):
         terms = []
@@ -354,14 +390,29 @@ for name, defs in CONFIGS:
         check(both == any(terms) and both == fw == win == lw,
               "%s: gp_in[25] lw_present %s, gp_in[24] lw_idle %s, gp_in[22] lw_held %s, hps_lw_bridge %s, "
               "lw_sys_window %s, MISTER_LW %s" % (name, terms[0], terms[1], terms[2], fw, win, lw))
-        zero = all(lit_value(gp[b][0][0]) == 0 and len(gp[b][0]) == 1 for b in range(21, 28) if b not in GPI)
-        check(zero, '%s: gp_in[27:26], gp_in[23] or gp_in[21] is not constant 0' % name)
+        t = gp[26][0]
+        if ocram:
+            check(t == ['ocram_present'], '%s: gp_in[26] is %s, not ocram_present' % (name, ' '.join(t)))
+            conn = oc[0][1] if len(oc) == 1 else {}
+            ok = W.get('ocram_present') == 1 and D.get('ocram_present', (0, 0, 0))[2] is None and \
+                 conn.get('present') == ['ocram_present'] and \
+                 not any(s[:1] == ['assign'] and 'ocram_present' in s[1:s.index('=')]
+                         for s in statements(top) if '=' in s)
+            check(ok, '%s: ocram_present is not a 1-bit net connected to hps_ocram_master.present alone' % name)
+        else:
+            check(len(t) == 1 and lit_value(t[0]) == 0, '%s: gp_in[26] is %s, not 0' % (name, ' '.join(t)))
+        check(len(oc) == (1 if ocram else 0),
+              '%s: %d hps_ocram_master instances, MISTER_OCRAM %s' % (name, len(oc), ocram))
+        zero = all(lit_value(gp[b][0][0]) == 0 and len(gp[b][0]) == 1 for b in range(21, 28)
+                   if b not in GPI and not (b == 26 and ocram))
+        check(zero, '%s: gp_in[27], gp_in[23] or gp_in[21] is not constant 0, or gp_in[26] is neither' % name)
     irq = bitmap(D.get('f2h_irq', (0, 0, None))[2], W)
     if check(irq is not None and len(irq) <= 64, '%s: f2h_irq is not a concatenation of sized terms' % name):
         irq += [(["1'b0"], 0)] * (64 - len(irq))
         check([' '.join(t) for t, _ in irq[:2]] == ['HDMI_TX_VS', 'video_sync'],
               '%s: f2h_irq[1:0] is not upstream\'s' % name)
         conn = inst['lw_sys_window'][0][1] if win else {}
+        conno = oc[0][1] if len(oc) == 1 else {}
         for b in range(2, 64):
             t, k = irq[b]
             if LINES_LO <= b < LINES_LO + LINES_W and lw:
@@ -369,15 +420,22 @@ for name, defs in CONFIGS:
                      D.get(t[0], (0, 0, 0))[2] is None and not any(s[:2] == ['assign', t[0]] for s in statements(top))
                 check(ok, '%s: f2h_irq[%d] is bit %d of %s, not bit %d of a %d-bit net driven by lw_sys_window.%s alone'
                       % (name, b, k, ' '.join(t), b - LINES_LO, LINES_W, LINES_PORT))
+            elif b == OCRAM_LINE and ocram:
+                ok = t == ['ocram_line'] and k == 0 and conno.get(OCRAM_LINE_PORT) == t and \
+                     W.get(t[0]) == 1 and D.get(t[0], (0, 0, 0))[2] is None and \
+                     not any(s[:2] == ['assign', t[0]] for s in statements(top))
+                check(ok, '%s: f2h_irq[%d] is %s, not the net driven by hps_ocram_master.%s alone'
+                      % (name, b, ' '.join(t), OCRAM_LINE_PORT))
             else:
                 check(len(t) == 1 and lit_value(t[0]) == 0, '%s: f2h_irq[%d] is %s, not 0' % (name, b, ' '.join(t)))
-    check(bool(nets) == lw, '%s: %d LW nets for arm E' % (name, len(nets)))
-    print('%s: %d LW nets (%s), %d LW ports (%s)' % (name, len(nets), ' '.join(nets), len(lwports), ' '.join(lwports)))
+    check(bool(nets) == (lw or ocram), '%s: %d floor nets for arm E' % (name, len(nets)))
+    print('%s: %d floor nets (%s), %d floor ports (%s)'
+          % (name, len(nets), ' '.join(nets), len(lwports), ' '.join(lwports)))
     write_nets(os.path.join(O, name + '.nets.vh'), nets, lwports)
 
 # ---- The crossing structure: every crossing register in sys/lw_cdc.sv's cells, every source named ----
 LWALL = ['MISTER_LW', 'MISTER_LW_PAD', 'MISTER_LW_EVT', 'MISTER_LW_SECTOR_SLOT=1', 'MISTER_LW_LANE', 'MISTER_LW_OSD',
-         'LW_DIAG=1']
+         'LW_DIAG=1', 'MISTER_OCRAM', 'MISTER_OCRAM_DIAG', 'MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT=1']
 CDC = 'sys/lw_cdc.sv'
 CELLREG = ('lws0_', 'lws1_', 'lwa0_', 'lwa1_', 'lwq_', 'lwsrc_', 'lwtg_')
 CELLSYNC = {'lws0_q', 'lws1_q', 'lwa0_q', 'lwa1_q'}
@@ -397,7 +455,9 @@ PORTDOM = {'lw_sector': ('clk_sys', 'c_reset c_req c_lba hps_ack c_commit c_wide
            'lw_evt': ('clk_sys', 'st ev lvl'),
            'lw_lane': ('clk_sys', 'l_busy l_wait l_dout'),
            'lw_osd': ('clk_sys', 'sel view'),
-           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide')}
+           'hps_ocram_rx': ('clk_sys', 'sel view x_reset x_hps_ack x_req x_lba x_commit x_wide'),
+           'lw_sys_window': ('clk_sys', 'lane_busy lane_wait lane_dout osd_sel osd_view hps_lw io_wide xsec_en '
+                                        'xsec_ack xsec_wr xsec_dat xsec_adr')}
 # The presence bits, read on the window's clk as constants: each core-side piece ties its bit to 1, and an absent
 # piece leaves it to the pull-down. Only these nets, each assigned exactly this select, are exempt; every other bit
 # of hps_lw is on clk_sys and crosses through a cell.
@@ -681,7 +741,8 @@ def plain_ref(ts):
     return r
 
 print('-- crossing structure: the cells hold every crossing register, and every source has its name')
-lwfiles = sorted('sys/' + x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_)\w*\.s?v$', x))
+lwfiles = sorted('sys/' + x for x in os.listdir('sys')
+                 if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
 stock = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv']
 check(CDC in lwfiles, '%s: no such file' % CDC)
 # rule 1: cell register names and the synchroniser attribute
@@ -730,8 +791,9 @@ for n, M in sorted(mods.items()):
         if mod == 'lw_qstat':
             check(n == 'lw_xfer', '%s: lw_qstat outside lw_xfer' % where)
         if mod == 'lw_arst':
-            check(' '.join(con.get('rst_n', [])) in ('hps_rst_n', 'gp_out [ 31 ]'),
-                  '%s: rst_n is %s, not hps_rst_n or gp_out[31]' % (where, ' '.join(con.get('rst_n', []))))
+            check(re.fullmatch(r'(?:hps_rst_n|gp_out \[ (?:31|28|27|26) \])', ' '.join(con.get('rst_n', []))) is not None,
+                  '%s: rst_n is %s, not hps_rst_n or gp_out[31], [28], [27] or [26]'
+                  % (where, ' '.join(con.get('rst_n', []))))
         if mod == 'lw_xfer':
             c = ''.join(con.get('s_clk', []))
             src = {s for x in ('s_go', 's_d') for m in idents(con.get(x, [])) for s in sources(M, reg, cell, port, m)}
@@ -811,7 +873,8 @@ for n, nets in sorted(PRESENCE.items()):
         check(got == sel, '%s: the presence net %s is %s, not %s' % (n, net, got or 'gone', sel))
 print('crossing structure: %d lw_sync instances, %d source registers, %d enable links, %d listed reads across '
       'clocks' % (nsync, nsrc, nfence, len(seen_allow)))
-check(nfence == 3, 'enable links: %d lw_fence instances, not one each in lw_sector, lw_osd and lw_lane' % nfence)
+check(nfence == 4, 'enable links: %d lw_fence instances, not one each in lw_sector, lw_osd, lw_lane and '
+      'hps_ocram_rx' % nfence)
 
 # ---- The firewall's two GPI outputs: present is the constant 1, idle a clk register ----
 print('-- hps_lw_bridge: present is the constant 1 and idle the register idle_q')
@@ -833,6 +896,101 @@ RB = FWM['lw_axi_regbus']
 idq = [clk for clk, out in RB['blocks'] if any('idle_q' in lhs_names(lhs)[0] for lhs, _, _, _ in out)]
 check('idle_q' in RB['regs'] and idq == ['clk'] and 'idle_q' not in RB['comb'],
       'lw_axi_regbus: idle_q is not a register assigned only on posedge clk (blocks on %s)' % idq)
+
+# ---- The OCRAM floor's two top-level outputs: present is the constant 1, line a clk register ----
+print('-- hps_ocram_master: present is the constant 1 and line a clk register')
+OMTOK = module(tokens(pp('sys/hps_ocram_master.sv', OCMACS)), 'hps_ocram_master')
+OM = modules_of('sys/hps_ocram_master.sv', OCMACS)['hps_ocram_master']
+check(ports(OMTOK).get('present', '').split()[:2] == ['output', 'wire'],
+      'hps_ocram_master: present is not an output wire')
+check(assigns(OMTOK, 'present') == [["1'b1"]], 'hps_ocram_master: present is %s, not the constant 1 alone'
+      % assigns(OMTOK, 'present'))
+check(not any('present' in idents(sum(con.values(), [])) for _, _, _, con in OM['insts']),
+      'hps_ocram_master: present is connected to an instance')
+check(ports(OMTOK).get('line', '') == 'output reg line', 'hps_ocram_master: line is not an output reg')
+check(assigns(OMTOK, 'line') == [], 'hps_ocram_master: line has a continuous assignment')
+lq = [clk for clk, out in OM['blocks'] for lhs, _, _, _ in out if lhs_names(lhs)[0] == ['line']]
+check(lq == ['clk'] and 'line' not in OM['comb'],
+      'hps_ocram_master: line is not a register assigned once on posedge clk (blocks on %s)' % lq)
+
+# ---- hps_ocram_*: every address is {16'hFFFF, off}; off a control localparam, an EVT word or a consumer's
+# ---- ring word from a localparam base and a masked index ----
+print('-- hps_ocram_master.sv and hps_ocram_rx.sv: the constant upper address half, every offset bounded')
+OTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS)))
+OSTXT = ' '.join(tokens(pp('sys/hps_ocram_master.sv', OCMACS_SEC)))
+ODTXT = ' '.join(tokens(pp('sys/hps_ocram_rx.sv', OCMACS_SEC)))
+ALLT = OTXT + ' ' + OSTXT + ' ' + ODTXT
+CTRL = {'H_HELLO': 0x00, 'H_BIND': 0x04, 'H_LINE': 0x08, 'H_SECTOR': 0x0c, 'H_IDX2': 0x18, 'H_IDX3': 0x1c,
+        'H_IDX4': 0x20, 'C_HELLO': 0x80, 'C_VERSION': 0x84, 'C_CAPS': 0x88, 'C_STATE': 0x8c, 'C_IDX2': 0x98,
+        'C_IDX3': 0x9c, 'C_IDX4': 0xa0, 'C_BIND': 0xa4, 'C_RING2': 0xb8, 'C_RING3': 0xbc,
+        'C_RING4': 0xc0, 'C_K0': 0xd0, 'C_K1': 0xd4, 'C_K2': 0xd8, 'C_K4': 0xe0, 'C_K5': 0xe4, 'C_K8': 0xf0}
+LITS = dict(re.findall(r"localparam \[ 15 : 0 \] (\w+) = 16'h([0-9A-Fa-f]+) ;", ALLT))
+for n_, v_ in sorted(CTRL.items()):
+    check(int(LITS.get(n_, '-1'), 16) == v_ and v_ < 0x100,
+          'hps_ocram_*: %s is not 16''h%02X below 0x100' % (n_, v_))
+for b_, w_, bv, wv in (('EVT_BASE', 'EVT_WORDS', 0x4000, 2048), ('TS_BASE', 'TS_WORDS', 0x7000, 8192),
+                       ('OSD_BASE', 'OSD_WORDS', 0x2000, 2048), ('SEC_BASE', 'SEC_WORDS', 0x7000, 8192)):
+    M_ = re.search(r"localparam \[ 15 : 0 \] %s = 16'd(\d+) ;" % w_, ALLT)
+    ew = int(M_.group(1)) if M_ else -1
+    check(int(LITS.get(b_, '-1'), 16) == bv and ew == wv,
+          'hps_ocram_*: %s/%s are not 16''h%04X/%d' % (b_, w_, bv, wv))
+    check(ew > 0 and bv + 4 * ew <= 0xF000,
+          'hps_ocram_*: %s + 4*%s (%s) is not below 0xF000' % (b_, w_, bv + 4 * ew if ew > 0 else '?'))
+for OT_, OWHO in ((OTXT, 'DIAG'), (OSTXT, 'SECTOR')):
+    for r_ in ('araddr', 'awaddr'):
+        check(len(re.findall(r"assign %s = \{ 16'hFFFF , off_q \} ;" % r_, OT_)) == 1 and
+              len(re.findall(r"\b%s = " % r_, OT_)) == 1,
+              'hps_ocram_master (%s): ' % OWHO + '%s is not one {16''hFFFF, off_q} assignment' % r_)
+    check(re.findall(r"off_q < = (\w+) ;", OT_) == ['t_off'],
+          'hps_ocram_master (%s): ' % OWHO + 'off_q has another source than t_off: %s' % re.findall(r"off_q < = (\w+) ;", OT_))
+    TSRC = re.findall(r"(?<![A-Za-z0-9_])t_off = (hj_off \( hj_k \)|[A-Za-z_]\w*) ;", OT_)
+    check(TSRC and len(re.findall(r"(?<![A-Za-z0-9_])t_off = ", OT_)) == len(TSRC) and
+          set(TSRC) <= set(CTRL) | {'evt_off', 'c0_off', 'c1_off', 'hj_off ( hj_k )'},
+          'hps_ocram_master (%s): ' % OWHO + 'an offset that is not a control localparam, evt_off, a consumer offset or hj_off: %s'
+          % ' '.join(sorted(set(TSRC))))
+    check(set(re.findall(r"hj_off = (\w+) ;", OT_)) <= set(CTRL),
+          'hps_ocram_master (%s): ' % OWHO + 'hj_off returns a value that is not a control localparam')
+    check(len(re.findall(r"wire \[ 15 : 0 \] evt_off = EVT_BASE \+ \( \( evt_index & \( EVT_WORDS - 1 \) \) < < 2 \) ;", OT_)) == 1
+          and len(re.findall(r"evt_off = ", OT_)) == 1,
+          'hps_ocram_master (%s): ' % OWHO + 'evt_off is not one EVT_BASE + ((index & (EVT_WORDS-1)) << 2) assignment')
+    check(len(re.findall(r"wire \[ 15 : 0 \] evt_index = head_q \+ \{ 10'd0 , rec_k \} ;", OT_)) == 1,
+          'hps_ocram_master (%s): ' % OWHO + 'evt_index is not head_q + rec_k')
+# The consumers' own offsets: a control localparam or a ring word, hdr_off/pay1_off/pay2_off, each one
+# base + ((index & (words - 1)) << 2) of a localparam base and the ring's size.
+def consumer_offsets(text, who):
+    src = re.findall(r"req_off < = (\w+) ;", text)
+    check(len(src) == len(re.findall(r"req_off < = ", text)), '%s: a req_off assignment that is not one name' % who)
+    named = set(re.findall(r"wire \[ 15 : 0 \] (\w+) = [A-Za-z_]\w* \+ \( \( \w+ & \( \w+ - 1 \) \) < < 2 \) ;",
+                           text))
+    check(src and set(src) <= set(CTRL) | named,
+          '%s: an offset that is not a control localparam or a ring word: %s' % (who, ' '.join(sorted(set(src)))))
+    check(len(re.findall(r"assign c_off = req_off ;", text)) == 1, '%s: c_off is not req_off alone' % who)
+    return named
+def ring_wires(text, base, words, who):
+    got = set(re.findall(r"wire \[ 15 : 0 \] (\w+) = %s \+ \( \( \w+ & \( %s - 1 \) \) < < 2 \) ;"
+                         % (base, words), text))
+    check(got, '%s: no %s + ((index & (%s - 1)) << 2) ring word' % (who, base, words))
+    return got
+rx_named = consumer_offsets(ODTXT, 'hps_ocram_rx')
+rx_rings = ring_wires(ODTXT, 'OSD_BASE', 'OSD_WORDS', 'hps_ocram_rx') | \
+           ring_wires(ODTXT, 'SEC_BASE', 'SEC_WORDS', 'hps_ocram_rx')
+check(rx_named == rx_rings, 'hps_ocram_rx: an offset wire is not an OSD_BASE or SEC_BASE ring word: %s'
+      % (rx_named ^ rx_rings))
+ts_named = consumer_offsets(OTXT, 'hps_ocram_tsink') - {'evt_off'}
+check(ts_named == ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink'),
+      'hps_ocram_tsink: an offset wire is not a TS_BASE ring word: %s' % (ts_named ^
+      ring_wires(OTXT, 'TS_BASE', 'TS_WORDS', 'hps_ocram_tsink')))
+# the generate-time guards: a span above 0xF000 or a control constant above 0xFF stops elaboration
+for pat, who in ((r"OSD_BASE \+ OSD_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"SEC_BASE \+ SEC_WORDS \* 4 > 16'hF000", 'hps_ocram_rx'),
+                 (r"H_IDX2 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"C_IDX2 > = 16'h0100", 'hps_ocram_rx'),
+                 (r"H_SECTOR > = 16'h0100", 'hps_ocram_master'),
+                 (r"TS_BASE \+ TS_WORDS \* 4 > 16'hF000", 'hps_ocram_tsink'),
+                 (r"H_IDX4 > = 16'h0100", 'hps_ocram_tsink'),
+                 (r"C_IDX4 > = 16'h0100", 'hps_ocram_tsink'),
+                 (r"EVT_BASE \+ EVT_WORDS \* 4 > 16'hF000", 'hps_ocram_master')):
+    check(re.search(pat, ALLT) is not None, '%s: no generate-time guard %s' % (who, pat))
 
 # ---- The directory's lines: one ordinal per entry, each driving its own bit of lines ----
 print('-- lw_sys_window: each LINE word an entry\'s own ordinal, and the same localparam picks its bit of lines')
@@ -950,11 +1108,11 @@ check(sdcl, '%s: no such file, or no command in it' % SDC)
 # the collections: name -> patterns; the Gray loop's query is expanded per bus
 COLL, pats = {}, []
 for l in sdcl:
-    for v, q, a in re.findall(r'\bset (\w+) +\[get_keepers -nowarn (\{([^{}]*)\}|"[^"]*")\]', l):
+    for v, q, a in re.findall(r'\bset (\w+) +\[get_(?:keepers|registers) -nowarn (\{([^{}]*)\}|"[^"]*")\]', l):
         ps = a.split() if a else [q[1:-1].replace('${g}', b) for b in GRAYBUS]
         COLL.setdefault(v, []).extend(ps); pats += ps
     n = len(re.findall(r'\bget_(?:keepers|registers|pins|nets|cells)\b', l))
-    check(n == len(re.findall(r'\bset \w+ +\[get_keepers -nowarn (?:\{[^{}]*\}|"[^"]*")\]', l)),
+    check(n == len(re.findall(r'\bset \w+ +\[get_(?:keepers|registers) -nowarn (?:\{[^{}]*\}|"[^"]*")\]', l)),
           '%s: a query this check cannot read: %s' % (SDC, l))
 nbound = 0
 for l in sdcl:
@@ -966,6 +1124,10 @@ for l in sdcl:
             for m in (fr, to):
                 if m:
                     check(m.group(1) in COLL, '%s: %s names $%s, which no get_keepers builds' % (SDC, cmd, m.group(1)))
+            if cmd == 'set_max_skew' and fr:
+                check(re.search(r'\bset %s +\[get_registers -nowarn ' % fr.group(1), SDCTXT) is not None,
+                      '%s: set_max_skew source $%s is not a get_registers query (the fallback form)' %
+                      (SDC, fr.group(1)))
 # every register of every LW module as a keeper name; a pattern's * matches across the hierarchy bars too
 KEEP = {('%s|%s:inst|%s' % ('sys_top', n, r)): (n, r) for n, M in mods.items() for r in M['regs']}
 def matched(ps):

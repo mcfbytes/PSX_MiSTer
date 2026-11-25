@@ -9,12 +9,17 @@
 #      only its clk_sys write side.
 #   1c. hps_io.sv with MISTER_LW and MISTER_LW_SECTOR_SLOT, under each of those macro sets, gives upstream's token
 #      stream for uio_block (the SPI command decoder): SECTOR's commit mark watches the commands and changes none.
-#   2. Every LW-only file (sys/hps_lw_*.sv, sys/lw_*.sv) preprocesses to no token at all without MISTER_LW,
-#      under each of those macro sets; a tier's file also with MISTER_LW and without its tier macro.
-#   3. Every LW-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro) first,
-#      `default_nettype none first inside it, `default_nettype wire last. Each macro the file defines begins
-#      with LW_ and is undefined before the guard closes; it undefines no macro it did not define; it defines
-#      no LW_DIAG (a build sets that one).
+#   1d. hps_io.sv with MISTER_LW, MISTER_LW_PAD and MISTER_DISABLE_SPI_PAD gives the uio_block of the same build
+#      without it (1c ties that one to upstream's) less exactly the link's eight pad arms (0x02, 0x03, 0x10-0x13,
+#      0x1A, 0x3D), under each of those macro sets.
+#   2. Every framework-only file (sys/hps_lw_*.sv, sys/lw_*.sv, sys/hps_ocram_*.sv) preprocesses to no token at
+#      all without its floor macro, under each of those macro sets; a tier's file also with MISTER_LW and
+#      without its tier macro (hps_ocram_rx.sv and lw_blk_mux.sv: without both of theirs); sys/lw_cdc.sv, which serves either floor, is empty with neither and present
+#      with MISTER_LW or MISTER_OCRAM.
+#   3. Every framework-only file keeps its whole body in its guard: `ifdef MISTER_LW (then its tier macro), or
+#      `ifdef MISTER_OCRAM, first; `default_nettype none first inside it, `default_nettype wire last. Each macro
+#      the file defines begins with LW_ (or, in hps_ocram_master.sv, MISTER_OCRAM_) and is undefined before the
+#      file ends; it undefines no macro it did not define; it defines no LW_DIAG (a build sets that one).
 #   4. Every other file under sys/, and files.qip, is byte-identical to upstream; sys.qip adds only
 #      SYSTEMVERILOG_FILE lines for LW-only files and one SDC_FILE line for lw_bridge.sdc, right after
 #      sys_top.sdc's; Template.qsf's assignments (its comment and blank lines removed) are upstream's, and its
@@ -48,11 +53,21 @@ if [ "$(cat "$UP/.rev" 2>/dev/null)" != "$UPSTREAM" ] || [ ! -f "$UP/Template.sv
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "FAILED: no iverilog on PATH"; exit 1; }
 exec python3 -I - "$UP" "$O" <<'EOF'
-import difflib, os, re, subprocess, sys
+import difflib, hashlib, os, re, subprocess, sys
 UP, O = sys.argv[1], sys.argv[2]
+# A stock file this branch carries changed for its own sake, not for LW: its sha256 is pinned, so any other edit
+# still fails. sys/ascal.vhd is ascal-hphase-dda 91c0abe (E32, bit-exact against stock in sim/ascal's GHDL bench).
+PINNED = {'sys/ascal.vhd': '835a007dde05d310ffd38801b804d332fe6212337df44c3d9db7ec732d93fdc6'}
 STOCK = ['sys/sys_top.v', 'sys/hps_io.sv', 'sys/osd.v', 'sys/sysmem.sv', 'sys/emu_ports.vh']
 TIER = {'lw_pad.sv': 'MISTER_LW_PAD', 'lw_evt.sv': 'MISTER_LW_EVT', 'lw_sector.sv': 'MISTER_LW_SECTOR_SLOT',
         'lw_blk_mux.sv': 'MISTER_LW_SECTOR_SLOT', 'lw_lane.sv': 'MISTER_LW_LANE', 'lw_osd.sv': 'MISTER_LW_OSD'}
+# the OCRAM tiers: the floor's macro instead of MISTER_LW
+OTIER = {}
+# files built under either of two tier macros: (floor, [tier macros], local macro); empty without the floor or
+# without both tiers, opened as the floor, then each tier defining the local macro, then the local macro's guard
+EITHER = {'hps_ocram_rx.sv': ('MISTER_OCRAM', ['MISTER_OCRAM_OSD', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_OCRAM_RX_BUILT'),
+          'lw_blk_mux.sv': ('MISTER_LW', ['MISTER_LW_SECTOR_SLOT', 'MISTER_OCRAM_SECTOR_SLOT'], 'LW_BLK_MUX_BUILT')}
+TIER.pop('lw_blk_mux.sv')
 checks = fails = 0
 
 def check(ok, what):
@@ -155,43 +170,123 @@ for label, defs in sets:
     else:
         check(True, '')
 
-lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_)\w*\.s?v$', x))
-print('-- every LW-only file is empty without its macro (%s)' % ' '.join(lw))
+print('-- hps_io.sv with MISTER_DISABLE_SPI_PAD: the uio_block without it less exactly the link\'s eight pad arms')
+PADARMS = ["'h02", "'h03", "'h10", "'h11", "'h12", "'h13", "'h1a", "'h3d"]
+def labels(t):
+    # the case labels of uio_block's casex: a label token followed by ':' after a ';', 'end', 'begin' or 'endcase'
+    return [t[i] for i in range(1, len(t) - 1) if re.match(r"'h[0-9a-fA-FX]+$", t[i]) and t[i + 1] == ':' and
+            t[i - 1] in (';', 'end', 'begin', 'endcase')]
+for label, defs in sets:
+    lwd = ['MISTER_LW', 'MISTER_LW_PAD']
+    mine, e1 = pp('sys/hps_io.sv', lwd + ['MISTER_DISABLE_SPI_PAD'] + defs)
+    base, e2 = pp('sys/hps_io.sv', lwd + defs)
+    if not check(mine is not None and base is not None, 'sys/hps_io.sv [SPI_PAD, %s]: preprocessor error %s%s' %
+                 (label, e1, e2)):
+        continue
+    a_, b_ = uio_block(mine), uio_block(base)
+    if not check(a_ is not None and b_ is not None, 'sys/hps_io.sv [SPI_PAD, %s]: no uio_block' % label):
+        continue
+    ops = difflib.SequenceMatcher(None, b_, a_, autojunk=False).get_opcodes()
+    gone = sum((b_[i1:i2] for tg, i1, i2, _, _ in ops if tg == 'delete'), [])
+    other = [tg for tg, _, _, _, _ in ops if tg not in ('equal', 'delete')]
+    check(not other and sorted(labels(['end'] + gone)) == sorted(PADARMS) and
+          gone.count('begin') == gone.count('end'),
+          'sys/hps_io.sv [SPI_PAD, %s]: uio_block is not the LW build\'s less the arms %s: removed %s, other edits %s'
+          % (label, ' '.join(PADARMS), ' '.join(labels(['end'] + gone)), other))
+
+lw = sorted(x for x in os.listdir('sys') if re.match(r'(hps_lw_|lw_|hps_ocram_)\w*\.s?v$', x))
+OCM = 'hps_ocram_master.sv'
+print('-- every framework-only file is empty without its floor macro (%s)' % ' '.join(lw))
 for x in lw:
     f = 'sys/' + x
+    if x == 'lw_cdc.sv':
+        # the cells serve either floor: empty with neither, present with either
+        for label, defs in sets:
+            t, e = pp(f, defs)
+            if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
+                check(t == [], '%s [%s]: %d tokens with neither floor, from: %s'
+                      % (f, label, len(t or []), ' '.join((t or [])[:12])))
+        for label in ('MISTER_LW', 'MISTER_OCRAM'):
+            t, e = pp(f, [label])
+            check(t is not None and len(t) > 0, '%s [%s]: empty with a floor macro' % (f, label))
+        continue
+    if x == OCM:
+        for label, defs in sets:
+            t, e = pp(f, defs)
+            if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
+                check(t == [], '%s [%s]: %d tokens without MISTER_OCRAM, from: %s'
+                      % (f, label, len(t or []), ' '.join((t or [])[:12])))
+        t, e = pp(f, ['MISTER_OCRAM'])
+        check(t is not None and len(t) > 0, '%s: empty with MISTER_OCRAM' % f)
+        continue
     runs = [(label, defs) for label, defs in sets]
+    if x in EITHER:
+        fl, tm, _ = EITHER[x]
+        runs += [(fl + ' without ' + ' or '.join(tm) + ', ' + label, [fl] + defs) for label, defs in sets]
+        for m in tm:
+            t, e = pp(f, [fl, m + '=1'])
+            check(t is not None and len(t) > 0, '%s: empty with %s and %s' % (f, fl, m))
     if x in TIER:
         runs += [('MISTER_LW without ' + TIER[x] + ', ' + label, ['MISTER_LW'] + defs) for label, defs in sets]
+    if x in OTIER:
+        runs += [('MISTER_OCRAM without ' + OTIER[x] + ', ' + label, ['MISTER_OCRAM'] + defs)
+                 for label, defs in sets]
     for label, defs in runs:
         t, e = pp(f, defs)
         if check(t is not None, '%s [%s]: preprocessor error %s' % (f, label, e)):
             check(t == [], '%s [%s]: %d tokens outside the guard, from: %s' % (f, label, len(t or []),
                                                                              ' '.join((t or [])[:12])))
 
-print('-- every LW-only file keeps its body in its guard and leaves no macro behind')
+print('-- every framework-only file keeps its body in its guard and leaves no macro behind')
 for x in lw:
     f = 'sys/' + x
     t = tokens(open(f).read())
-    head = ['`ifdef', 'MISTER_LW'] + (['`ifdef', TIER[x]] if x in TIER else []) + ['`default_nettype', 'none']
-    tail = ['`default_nettype', 'wire'] + (['`endif'] if x in TIER else []) + ['`endif']
+    if x == 'lw_cdc.sv':
+        head = ['`ifdef', 'MISTER_LW', '`define', 'LW_CDC_BUILT', '`endif',
+                '`ifdef', 'MISTER_OCRAM', '`define', 'LW_CDC_BUILT', '`endif',
+                '`ifdef', 'LW_CDC_BUILT', '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', 'LW_CDC_BUILT']
+        scan = False                       # the prologue's ifdef/endif pairs are not one guard
+    elif x == OCM:
+        head = ['`ifdef', 'MISTER_OCRAM', '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', 'MISTER_OCRAM_MARK',
+                '`undef', 'MISTER_OCRAM_POLL']
+        scan = True
+    elif x in EITHER:
+        fl, tm, lm = EITHER[x]
+        head = ['`ifdef', fl] + sum([['`ifdef', m, '`define', lm, '`endif'] for m in tm], []) + \
+               ['`ifdef', lm, '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`undef', lm, '`endif']
+        scan = False
+    elif x in OTIER:
+        head = ['`ifdef', 'MISTER_OCRAM', '`ifdef', OTIER[x], '`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire', '`endif', '`endif']
+        scan = True
+    else:
+        head = ['`ifdef', 'MISTER_LW'] + (['`ifdef', TIER[x]] if x in TIER else []) + ['`default_nettype', 'none']
+        tail = ['`default_nettype', 'wire'] + (['`endif'] if x in TIER else []) + ['`endif']
+        scan = True
     check(t[:len(head)] == head, '%s: does not open with %s' % (f, ' '.join(head)))
     check(t[-len(tail):] == tail, '%s: does not close with %s' % (f, ' '.join(tail)))
-    depth, closed_at = 0, None
-    for i, k in enumerate(t):
-        if k in ('`ifdef', '`ifndef'):
-            depth += 1
-        elif k == '`endif':
-            depth -= 1
-            if depth == 0 and closed_at is None:
-                closed_at = i
-    check(closed_at == len(t) - 1, '%s: the guard closes before the end of the file (token %s of %d)' %
-          (f, closed_at, len(t)))
+    if scan:
+        depth, closed_at = 0, None
+        for i, k in enumerate(t):
+            if k in ('`ifdef', '`ifndef'):
+                depth += 1
+            elif k == '`endif':
+                depth -= 1
+                if depth == 0 and closed_at is None:
+                    closed_at = i
+        close_at = len(t) - len(tail) + max(i for i, x in enumerate(tail) if x == '`endif')
+        check(closed_at == close_at, '%s: the guard closes at token %s, not %d (of %d)' %
+              (f, closed_at, close_at, len(t)))
     live = {}
     for i, k in enumerate(t):
         if k in ('`define', '`undef') and i + 1 < len(t):
             m = t[i + 1]
             if k == '`define':
-                check(m.startswith('LW_'), '%s: defines %s, a name outside LW_' % (f, m))
+                okname = m.startswith('LW_') or (x == OCM and m.startswith('MISTER_OCRAM_'))
+                check(okname, '%s: defines %s, a name outside LW_' % (f, m))
                 check(m != 'LW_DIAG', '%s: defines LW_DIAG, which only a build sets' % f)
                 live[m] = True
             else:
@@ -207,7 +302,7 @@ def tree(root):
             r.add(os.path.relpath(os.path.join(d, x), root))
     return r
 mine, theirs = tree('.'), tree(UP)
-lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_)[^/]*$', p) is not None
+lwonly = lambda p: re.match(r'sys/(hps_lw_|lw_|hps_ocram_)[^/]*$', p) is not None
 for p in sorted(mine - theirs):
     check(lwonly(p), '%s: not in upstream and not an LW-only file' % p)
 for p in sorted(theirs - mine):
@@ -215,10 +310,13 @@ for p in sorted(theirs - mine):
 for p in sorted(mine & theirs) + ['files.qip']:
     if p in STOCK or p == 'sys/sys.qip':
         continue
+    if p in PINNED:
+        check(hashlib.sha256(open(p, 'rb').read()).hexdigest() == PINNED[p], '%s: differs from its pinned text' % p)
+        continue
     check(open(p, 'rb').read() == open(os.path.join(UP, p), 'rb').read(), '%s: differs from upstream' % p)
 qip = open('sys/sys.qip').read().splitlines()
 add = re.compile(r'set_global_assignment -name SYSTEMVERILOG_FILE \[file join \$::quartus\(qip_path\) '
-                 r'(hps_lw_|lw_)\w+\.sv \]$')
+                 r'(hps_lw_|lw_|hps_ocram_)\w+\.sv \]$')
 sdc = re.compile(r'set_global_assignment -name SDC_FILE +\[file join \$::quartus\(qip_path\) lw_bridge\.sdc \]$')
 rest = [l for l in qip if not add.match(l) and not sdc.match(l)]
 check(rest == open(os.path.join(UP, 'sys/sys.qip')).read().splitlines(),
@@ -305,7 +403,9 @@ if check(up is not None and up.startswith('Template;;') and up.count('T[0],Reset
                                               'MISTER_LW_LANE', 'MISTER_LW_OSD'],
              'S1,IMG,Block image;J,Colour,Read block;'),
             ('MISTER_LW, SECTOR on slot 3', ['MISTER_LW', 'MISTER_LW_SECTOR_SLOT=3'],
-             'S3,IMG,Block image;J,Colour,Read block;')]:
+             'S3,IMG,Block image;J,Colour,Read block;'),
+            ('MISTER_LW, the OCRAM SECTOR tier on slot 2', ['MISTER_LW', 'MISTER_OCRAM', 'MISTER_OCRAM_SECTOR_SLOT=2'],
+             'S2,IMG,Block image;J,Colour,Read block;')]:
         want = up if not extra else lw_up.replace('T[0],Reset;', extra + 'T[0],Reset;', 1)
         got, e = conf_str(defs)
         check(got == want, 'Template.sv [%s]: CONF_STR %s, expected %s %s' % (label, got, want, e))

@@ -281,6 +281,16 @@ lw_tier_needs_MISTER_LW lane_guard();
 `ifdef MISTER_LW_OSD
 lw_tier_needs_MISTER_LW osd_guard();
 `endif
+// The OCRAM SECTOR tier drives the LW sector bits of HPS_BUS, which only MISTER_LW builds.
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+ocram_sector_needs_MISTER_LW ocram_sector_guard();
+`endif
+`endif
+// MISTER_DISABLE_SPI_PAD compiles out the link's pad arms; without the LW pad tier a core would have no pad path.
+`ifdef MISTER_DISABLE_SPI_PAD
+`ifndef MISTER_LW_PAD
+spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
+`endif
 `endif
 
 assign HPS_BUS[37]   = ioctl_wait;
@@ -360,7 +370,15 @@ wire [15:0] disk = 16'd1 << io_din[11:8];
 
 `ifdef MISTER_LW
 `ifdef MISTER_LW_SECTOR_SLOT
-// The commit mark for sys_top's LW SECTOR block (lw_sector.sv): "the SPI host has been shown a block request and
+`define LW_COMMIT_MARK
+`endif
+`ifdef MISTER_OCRAM_SECTOR_SLOT
+`define LW_COMMIT_MARK
+`endif
+`endif
+`ifdef LW_COMMIT_MARK
+// The commit mark for sys_top's LW SECTOR block (lw_sector.sv) or OCRAM SECTOR feeder (hps_ocram_rx.sv), either
+// SECTOR macro: "the SPI host has been shown a block request and
 // has not finished it". A GET_SDSTAT answer sets it if it shows a request and clears it if it shows none; the end
 // of a block transfer command (the fall of sd_ack) clears it. HPS_BUS[380] is the mark with the answer cycle ORed
 // in, so the cycle that shows a request already reads 1; while it reads 1 no slot's mux moves to the LW side.
@@ -374,7 +392,7 @@ always @(posedge clk_sys) begin
 end
 assign HPS_BUS[380] = sd_commit | (sd_answer & sd_shown);
 assign HPS_BUS[381] = 1'b1;
-`endif
+`undef LW_COMMIT_MARK
 `endif
 
 always@(posedge clk_sys) begin : uio_block
@@ -477,12 +495,14 @@ always@(posedge clk_sys) begin : uio_block
 			casex(cmd)
 				// buttons and switches
 				'h01: cfg <= io_din;
+`ifndef MISTER_DISABLE_SPI_PAD
 				'h02: if(byte_cnt==1) joystick_0[15:0] <= io_din; else joystick_0[31:16] <= io_din;
 				'h03: if(byte_cnt==1) joystick_1[15:0] <= io_din; else joystick_1[31:16] <= io_din;
 				'h10: if(byte_cnt==1) joystick_2[15:0] <= io_din; else joystick_2[31:16] <= io_din;
 				'h11: if(byte_cnt==1) joystick_3[15:0] <= io_din; else joystick_3[31:16] <= io_din;
 				'h12: if(byte_cnt==1) joystick_4[15:0] <= io_din; else joystick_4[31:16] <= io_din;
 				'h13: if(byte_cnt==1) joystick_5[15:0] <= io_din; else joystick_5[31:16] <= io_din;
+`endif
 
 				// force feedback request, snapshot taken with the command word
 				'h0X45: if(FFB) case(byte_cnt)
@@ -547,6 +567,7 @@ always@(posedge clk_sys) begin : uio_block
 							io_dout <= sd_buff_din[sdn_ack];
 						end
 
+`ifndef MISTER_DISABLE_SPI_PAD
 				// joystick left analog
 				'h1a: if(!byte_cnt[MAX_W:2]) begin
 							case(byte_cnt[1:0])
@@ -590,6 +611,7 @@ always@(posedge clk_sys) begin : uio_block
 									endcase
 							endcase
 						end
+`endif
 
 				// 0x46: player, {RT, LT}
 				'h46: case(byte_cnt)

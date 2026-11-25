@@ -134,6 +134,33 @@ failing path inside the scaler (`ascal` to `ascal`), and the bridge clock had 2.
 inside the PAD drain. That build with `MISTER_LW` off gave an rbf bit-identical to upstream's. The frame lane
 without reply capture, measured on a larger core, took 165-177 ALMs plus 6-7 for `lw_link`, and 2 M10K.
 
+### Beside the window: the OCRAM mailbox (proposed)
+
+`docs/OCRAM_MAILBOX.md` proposes a third carrier for bulk data, beside SPI and this window. The HPS writes records
+into its own 64 KB on-chip RAM, and the core fetches them as a master on the FPGA-to-HPS bridge, which `sys/` already
+instantiates with no port connected. The payload waits in the HPS's RAM, so its tiers cost logic and no block memory, and
+the HPS never issues an access the fabric must answer. **Its floor, OSD tier and SECTOR tier are built, for test cores
+only; its other tiers are a design.**
+
+It moves no interface in this document. Its SECTOR tier (`MISTER_OCRAM_SECTOR_SLOT`) feeds the same SECTOR bits of
+`HPS_BUS` the SECTOR block feeds, through this window, so it needs `MISTER_LW`, the core hooks its slot through
+`lw_blk_mux` as below, and `hps_io` builds the commit mark under either SECTOR macro; a build of both stops, one slot
+having one feeder. No existing bus bit, port or hooking line here moves. Otherwise either floor builds without the
+other, each function has its own macro on each path, SPI stays under both, and a host binds one carrier per function.
+Where both are built the proposal is:
+
+| function | carrier proposed | why |
+|---|---|---|
+| pads | the PAD block here | one store per change, proven on hardware; a mailbox pad arrives one poll period late |
+| status and `hps_io`'s flags | the EVT block here | no block memory already; the mailbox version exists for a core with no LW bridge |
+| the OSD image | the mailbox | OSDBUF's FIFO is two block memories; a mailbox row is 65 memory stores and publishes whole |
+| block reads | the mailbox | SECTOR's FIFO is block memory; a mailbox frame is whole by construction, and blocks may be queued ahead of the core's requests |
+| save slots | the SECTOR block here, or SPI | a save block must reach the core whole or not at all, which needs the block's FIFO; the mailbox has none |
+| link frames | either | the LANE block's FIFOs are block memory; the mailbox keeps the same player |
+
+The mailbox adds a second floor in logic, so it is not the smaller choice for a core whose only bulk function is the
+OSD. Its guide has the menu, the cost estimates and the list of what is still unverified.
+
 ## Discovery and safety
 
 An LW access the fabric does not answer **hangs the SoC**. Nothing here is probed, so the HPS must know the
@@ -825,7 +852,11 @@ and have no presence bit.
 | `[374:372]` | from core | event levels `{upload pending, info pending, a block request stands}` (`hps_io`, with `MISTER_LW_EVT`) |
 | `[375]`, `[376]` | from core | presence, constant 1: `hps_io`'s LW write arm; its event exports |
 | `[377]`, `[378]`, `[379]` | from core | presence, constant 1: the primary's mux; save slot 0's; save slot 1's |
-| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT`); presence, constant 1: the mark |
+| `[380]`, `[381]` | from core | SECTOR's commit mark (`hps_io`, with `MISTER_LW_SECTOR_SLOT` or `MISTER_OCRAM_SECTOR_SLOT`); presence, constant 1: the mark |
+
+The primary's bits (`[95]`-`[127:114]` to the core, `[166:132]`, `[377]` and `[380]`-`[381]` from it) are also fed and
+read by the OCRAM mailbox's SECTOR feeder (`MISTER_OCRAM_SECTOR_SLOT`, `docs/OCRAM_MAILBOX.md`) with the same meaning;
+the window stays the one driver of every to-core bit, and lists no SECTOR entry in that build.
 | `[383:382]` | - | reserved: nothing drives them; every reader ignores them |
 
 ## What a host must not assume

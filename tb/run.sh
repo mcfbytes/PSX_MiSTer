@@ -24,10 +24,15 @@
 #   W  LW_DIAG=0 with hps_io at WIDE=0 (byte strobes), a 4096-word primary on hps_io slot 9, save slots of 510 and
 #      256 words with 32-bit LBAs on slots 12 and 15, strobes 5 cycles apart (LW_TB_GEOMW): T-SEC6
 #   L  LW_DIAG=0 with every tier, the frame lane (MISTER_LW_LANE) included: the link nets through lw_link
+#   P  LW_DIAG=0 with MISTER_DISABLE_SPI_PAD: the link's eight pad opcodes (0x02, 0x03, 0x10-0x13, 0x1A, 0x3D) are
+#      ignored and the LW PAD block's are taken; PAD K9 bit 0 reads 1 (the other arms prove the link's are taken)
 #   X  each tier macro without MISTER_LW: the compile of hps_io fails, naming lw_tier_needs_MISTER_LW (and
 #      compiles without the macro, and with MISTER_LW); and each unservable SECTOR geometry: the compile of the
 #      window fails, naming lw_sector_unservable_geometry (and the servable edges compile); and the Template's
-#      block reader outside hps_io slots 1-9: emu's compile fails, naming lw_template_block_slot_1_to_9
+#      block reader outside hps_io slots 1-9: emu's compile fails, naming lw_template_block_slot_1_to_9; and the
+#      OCRAM SECTOR and SPI-pad guards: MISTER_OCRAM_SECTOR_SLOT without MISTER_LW, with MISTER_OCRAM_DIAG, beside
+#      the LW SECTOR block, or at an unservable geometry, and MISTER_DISABLE_SPI_PAD without MISTER_LW_PAD, each
+#      fails naming its guard (and its legal neighbour compiles)
 #   T  the short tier run (LW_TB_TIER) in each of the 32 tier sets: the directory, the decode, the causes and
 #      lines, and the linked blocks' OWNED and OPEN bits of the set built
 #   B  the short tier run with every tier and a core side that leaves a piece out: a 46-bit bus at the core
@@ -44,16 +49,33 @@
 #   H  the HPS-side probe, tb/hps/lw_probe.c, compiled with warnings as errors by the host's C compiler (cc, or
 #      $CC) and, where one is on PATH, by arm-linux-gnueabihf-gcc; the testbench never runs it. And its own logic
 #      run on the build host: tb/hps/lw_probe_test.c includes the probe against a model of the window (its cases
-#      in its header), compiled the same way and run once. It all runs before any container starts (the image
-#      has no C compiler). Without a C compiler the arm reports SKIPPED and does not fail.
-# LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F and 0. LW_TB_JOBS (8) runs at a time in
-# arms E, T and B. Needs Icarus Verilog >= 12
+#      in its header), compiled the same way and run once. The OCRAM probe, tb/hps/ocram_probe.c, the same way
+#      (as built for the HPS, and with -DOCRAM_FAKE), and tb/hps/ocram_probe_test.c, which drives it against the
+#      model of tb/hps/ocram_probe_fake.h (its cases in its header, the part-full --band mode among them), run once.
+#      It all runs before any container starts (the image has no C compiler). Without a C compiler the arm reports
+#      SKIPPED and does not fail.
+#   O  the OCRAM floor's and OSD tier's bench (tb/ocram_tb.sv) under Icarus, every seed of LW_TB_SEEDS once
+#      plain and once with the crossing cells' delay models (LW_TB_CDC), compiled twice: with DIAG (MARK records,
+#      the torture sink, the freeze knob) and without (the OSD cases in the shipping shape); and verilator
+#      --lint-only -Wall on hps_ocram_master.sv and hps_ocram_rx.sv (and its hps_ocram_sfeed) with lw_cdc.sv,
+#      under each OCRAM macro set, which must be warning-free. A third shape builds the SECTOR tier
+#      (MISTER_OCRAM_SECTOR_SLOT, a 588-word frame) beside the OSD; each shape also runs with clk_sys at
+#      33.8688 and 20 MHz (a CD core's, the Template's)
+#   Q  hps_io's 0x14 readout of a synthetic CONF_STR over 3 KB (tb/conf_str_3k.vh) with CONF_STR_BRAM 0 and 1
+#      (tb/confstr_tb.sv): every byte equal between the two and to the string, at strobe gaps of 2 and 5. Icarus
+#      reads a copy of hps_io.sv with byte_cnt declared above confstr_rom's port connection, which names it first
+#   C  the trace compare (tb/sfeed_tb.sv): lw_sector's primary feeder and the OCRAM SECTOR feeder serve the same
+#      frames, {ack, wr, adr, dat} compared on every clk_sys edge from each ack's rise: GAP 2 and 5, wide and byte
+#      strobes, plus the consumer-reset and session-end fills, at 33.8688 MHz; a 588-word frame and the
+#      Template's 20 MHz at GAP 2 wide; every seed, plain and with the crossing cells' delay models
+# LW_TB_ARMS selects arms (default: all); LW_TB_QUICK=1 runs S, N, E, F, 0 and O. LW_TB_JOBS (8) runs at a time
+# in arms E, T and B. Needs Icarus Verilog >= 12
 # (11 cannot parse hps_io's default-less CONF_STR). Without a local one, set LW_TB_IMAGE to a container image
 # that has it; the tree is mounted at /w.
 # Logs go to $LW_TB_OUT (tb/out). The last lines are one result per arm; the exit status is 0 only if all pass.
 cd "$(dirname "$0")/.." || exit 2
-[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0}
-ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V}
+[ -n "$LW_TB_QUICK" ] && : ${LW_TB_ARMS:=S N E F 0 O}
+ARMS=${LW_TB_ARMS:-S N E Z 1 0 M F G W L X T B R12 R20 R21 R33 R53 R62 R100 R150 H V O C P Q}
 O=${LW_TB_OUT:-tb/out}
 
 # probe LOG: arm H, on the host. The log's first line names this run, so a run in the container reads only its own.
@@ -65,12 +87,17 @@ probe() {
       [ $n -eq 0 ] && { echo "SKIPPED: no C compiler ($c) on PATH" >> "$1"; return 0; }
       continue
     fi
-    for src in lw_probe lw_probe_test; do
+    for src in lw_probe lw_probe_test ocram_probe ocram_probe_fake ocram_probe_test; do
       echo "-- $c: tb/hps/$src.c" >> "$1"; n=$((n + 1)); rm -f "$O/$src.$(basename "$c")"
-      x=""; [ $src = lw_probe_test ] && x=-pthread
-      if $c $W $x -o "$O/$src.$(basename "$c")" tb/hps/$src.c >> "$1" 2>&1; then
+      x=""; s=$src
+      case $src in
+        lw_probe_test) x=-pthread;;
+        ocram_probe_fake) x="-DOCRAM_FAKE -pthread"; s=ocram_probe;;
+        ocram_probe_test) x="-DOCRAM_FAKE -pthread";;
+      esac
+      if $c $W $x -o "$O/$src.$(basename "$c")" tb/hps/$s.c >> "$1" 2>&1; then
         echo "pass $c: compiles, no warning" >> "$1"
-      else f=$((f + 1)); echo "FAIL $c: $src.c does not compile without a warning" >> "$1"
+      else f=$((f + 1)); echo "FAIL $c: $s.c does not compile without a warning" >> "$1"
       fi
     done
   done
@@ -85,6 +112,18 @@ probe() {
       f=$((f + 1)); echo "FAIL lw_probe_test: status $st, no failed check named" >> "$1"
     fi
     r=${r:-0}
+  fi
+  # the OCRAM probe's own logic (--band and the first probe's modes), on the model of tb/hps/ocram_probe_fake.h
+  t=$O/ocram_probe_test.$(basename "${CC:-cc}"); q=0
+  if [ -x "$t" ]; then
+    "$t" > "$O/ocram_probe_test.log" 2>&1; st=$?
+    cat "$O/ocram_probe_test.log" >> "$1"
+    q=$(sed -n 's/^ocram_probe_test: \([0-9]*\) checks.*/\1/p' "$O/ocram_probe_test.log"); nf=$(grep -c '^FAIL ' "$O/ocram_probe_test.log")
+    f=$((f + nf))
+    if [ $nf -eq 0 ] && { [ $st -ne 0 ] || [ -z "$q" ]; }; then
+      f=$((f + 1)); echo "FAIL ocram_probe_test: status $st, no failed check named" >> "$1"
+    fi
+    r=$((r + ${q:-0}))
   fi
   if [ $f -eq 0 ]; then echo "PASSED: $n compiles, $r probe checks, 0 failures" >> "$1"
   else echo "FAILED: $n compiles, $r probe checks, $f failures" >> "$1"; fi
@@ -128,6 +167,105 @@ lint() {
     done
   done
   return $st
+}
+
+# sfeedc LOG: arm C, the trace compare: each shape compiled once, run under every seed, plain and with the models.
+sfeedc() {
+  : > "$1"
+  SFD="-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1"
+  SFF="tb/sfeed_tb.sv sys/lw_sector.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv"
+  for sh in "g2w1:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1" "g2w0:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=0" \
+            "g5w1:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=1" "g5w0:-DSFEED_TB_GAP=5 -DSFEED_TB_WIDE=0" \
+            "f588:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_FRAME=588" \
+            "tpl:-DSFEED_TB_GAP=2 -DSFEED_TB_WIDE=1 -DSFEED_TB_SYS_HP_PS=25000"; do
+    t=${sh%%:*}; X=${sh#*:}
+    for m in plain cdc; do
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the trace bench compiles ($t, $m)" >> "$1"
+      if iverilog -g2012 $SFD $X $d -I sys -o "$O/sfeedC_${t}_$m.vvp" $SFF > "$O/sfeedC_${t}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($t, $m)" >> "$1"
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          vvp -n "$O/sfeedC_${t}_$m.vvp" +lw_seed=$s > "$O/sfeedC_${t}_$m.$s.log" 2>&1 &
+        done; wait
+        for s in ${LW_TB_SEEDS:-1 2 3}; do
+          echo "== seed $s $t $m" >> "$1"; cat "$O/sfeedC_${t}_$m.$s.log" >> "$1"
+          grep -Eq '^(PASSED|FAILED): [0-9]' "$O/sfeedC_${t}_$m.$s.log" || echo "FAIL bench $s $t $m: gave no result" >> "$1"
+        done
+      else
+        echo "FAIL bench: does not compile ($t, $m)" >> "$1"; head -20 "$O/sfeedC_${t}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+}
+
+# ocram LOG: arm O. The bench compiles five times (with DIAG; the OSD shape and the OSD + SECTOR shape, each at two
+# clk_sys rates), each plain and
+# with the crossing cells' delay models, runs under every seed of LW_TB_SEEDS, then verilator lints
+# hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv (each OCRAM macro set), warnings as errors.
+ocram() {
+  : > "$1"; n=0; f=0
+  OCB="tb/ocram_tb.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_cdc.sv sys/osd.v"
+  OCD="-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD -DMISTER_OCRAM_MARK=14 -DMISTER_OCRAM_POLL=10"
+  OCE="-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_POLL=10"
+  OCS="$OCE -DMISTER_OCRAM_SECTOR_SLOT=2 -DMISTER_OCRAM_SECTOR_FRAME=588"
+  # shape:macros; diag at the bench's 50 MHz, the others at 33.8688 MHz and the Template's 20 MHz
+  for m in plain cdc; do
+    for c in diag osd33 osd20 sec33 sec20; do
+      case $c in diag) D=$OCD;; osd33) D="$OCE -DOCRAM_TB_SYS_HP_PS=14762";; osd20) D="$OCE -DOCRAM_TB_SYS_HP_PS=25000";;
+        sec33) D="$OCS -DOCRAM_TB_SYS_HP_PS=14762";; sec20) D="$OCS -DOCRAM_TB_SYS_HP_PS=25000";; esac
+      d=""; [ "$m" = cdc ] && d=-DLW_TB_CDC
+      echo "-- the bench compiles ($c, $m)" >> "$1"
+      if iverilog -g2012 $D $d -I sys -o "$O/ocramO_${c}_$m.vvp" $OCB > "$O/ocramO_${c}_$m.err" 2>&1; then
+        echo "pass bench: compiles ($c, $m)" >> "$1"; n=$((n + 1))
+      else
+        f=$((f + 1)); echo "FAIL bench: does not compile ($c, $m)" >> "$1"
+        head -20 "$O/ocramO_${c}_$m.err" | sed 's/^/   /' >> "$1"
+      fi
+    done
+  done
+  for m in plain cdc; do
+    for c in diag osd33 osd20 sec33 sec20; do
+      [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
+      for s in ${LW_TB_SEEDS:-1 2 3}; do
+        vvp -n "$O/ocramO_${c}_$m.vvp" +lw_seed=$s > "$O/ocramO_${c}_$m.$s.log" 2>&1 &
+      done
+      wait                                     # the seeds side by side, one shape at a time
+    done
+  done
+  for s in ${LW_TB_SEEDS:-1 2 3}; do
+    for c in diag osd33 osd20 sec33 sec20; do
+      for m in plain cdc; do
+        [ -f "$O/ocramO_${c}_$m.vvp" ] || continue
+        echo "== seed $s $c $m" >> "$1"
+        cat "$O/ocramO_${c}_$m.$s.log" >> "$1"
+        grep -Eq '^(PASSED|FAILED): [0-9]' "$O/ocramO_${c}_$m.$s.log" ||
+          echo "FAIL bench $s $c $m: gave no result" >> "$1"
+      done
+    done
+  done
+  echo "-- verilator --lint-only -Wall on hps_ocram_master.sv and hps_ocram_rx.sv with lw_cdc.sv, which must be silent" >> "$1"
+  if command -v verilator >/dev/null 2>&1; then
+    vok=1
+    for VS in "diag:-DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_OSD" "osd:-DMISTER_OCRAM -DMISTER_OCRAM_OSD" \
+              "sec:-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=2" "both:-DMISTER_OCRAM -DMISTER_OCRAM_OSD -DMISTER_OCRAM_SECTOR_SLOT=2"; do
+      vn=${VS%%:*}; VF=${VS#*:}
+      for t in hps_ocram_master hps_ocram_rx hps_ocram_sfeed; do
+        G=""; fl=$t
+        [ $t = hps_ocram_sfeed ] && { case $vn in sec|both) fl=hps_ocram_rx;; *) continue;; esac; }
+        [ $t = hps_ocram_rx ] && case $vn in sec) G="-GOSD_EN=0 -GSEC_EN=1";; both) G="-GSEC_EN=1";; esac
+        if ! verilator --lint-only -Wall $VF $G --top-module $t -Isys "sys/$fl.sv" sys/lw_cdc.sv \
+             > "$O/ocramV_${t}_$vn.log" 2>&1 || [ -s "$O/ocramV_${t}_$vn.log" ]; then
+          vok=0; echo "FAIL verilator: $t ($vn)" >> "$1"; head -20 "$O/ocramV_${t}_$vn.log" | sed 's/^/   /' >> "$1"
+        fi
+      done
+    done
+    if [ $vok -eq 1 ]; then echo "pass verilator: no warning" >> "$1"; n=$((n + 1))
+    else f=$((f + 1)); fi
+  else
+    echo "SKIPPED verilator: not on PATH" >> "$1"
+  fi
+  if [ $f -eq 0 ]; then echo "PASSED: $n compiles and runs, 0 failures" >> "$1"
+  else echo "FAILED: $n compiles and runs, $f failures" >> "$1"; fi
 }
 
 # elab LOG: arm E, one elaboration and simulation of tb/top_tb.sv per configuration; the log ends with one
@@ -204,6 +342,47 @@ xarm() {
     else f=$((f + 1)); echo "FAIL $m with MISTER_LW: does not compile" >> "$1"; head -5 "$O/lw_x.err" | sed 's/^/   /' >> "$1"
     fi
   done
+  # the new guards: each macro pairing that cannot be built stops naming its guard, and its legal neighbour compiles
+  cat > "$O/lw_xo_top.sv" <<'EOS'
+module lw_xo_top;
+hps_io #(.CONF_STR("X;")) hps_io();
+`ifdef XO_MASTER
+hps_ocram_master m();
+`endif
+`ifdef XO_WIN
+lw_sys_window #(.SEC_EN(1), .SEC_EXT(1)) w();
+`endif
+`ifdef XO_RX
+hps_ocram_rx #(.OSD_EN(0), .SEC_EN(1), .FRAME(`XO_FRAME), .GAP(`XO_GAP)) r();
+`endif
+endmodule
+EOS
+  XOF="$O/lw_xo_top.sv sys/hps_io.sv sys/lw_cdc.sv sys/hps_ocram_master.sv sys/hps_ocram_rx.sv sys/lw_sys_window.sv sys/lw_sector.sv"
+  while IFS='|' read -r want guard what d; do
+    echo "-- $what" >> "$1"
+    iverilog -g2012 $d -I sys -s lw_xo_top -o "$O/lw_xo.vvp" $XOF > "$O/lw_xo.err" 2>&1
+    r=$?; n=$((n + 1)); g=$(grep -c "$guard" "$O/lw_xo.err")
+    if [ "$want" = bad ]; then
+      if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass $what: stops, naming $guard" >> "$1"
+      else f=$((f + 1)); echo "FAIL $what: status $r, $guard $g times in the errors" >> "$1"; fi
+    elif [ $r -eq 0 ]; then echo "pass $what: compiles" >> "$1"
+    else f=$((f + 1)); echo "FAIL $what: does not compile" >> "$1"; head -5 "$O/lw_xo.err" | sed 's/^/   /' >> "$1"; fi
+  done <<'EOG'
+bad|ocram_sector_needs_MISTER_LW|MISTER_OCRAM_SECTOR_SLOT without MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1
+ok|-|MISTER_OCRAM_SECTOR_SLOT with MISTER_LW|-DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DMISTER_LW
+bad|spi_pad_off_needs_MISTER_LW_PAD|MISTER_DISABLE_SPI_PAD without MISTER_LW_PAD|-DMISTER_LW -DMISTER_DISABLE_SPI_PAD
+bad|spi_pad_off_needs_MISTER_LW_PAD|MISTER_DISABLE_SPI_PAD alone|-DMISTER_DISABLE_SPI_PAD
+ok|-|MISTER_DISABLE_SPI_PAD with MISTER_LW_PAD|-DMISTER_LW -DMISTER_LW_PAD -DMISTER_DISABLE_SPI_PAD
+bad|ocram_sector_excludes_MISTER_OCRAM_DIAG|MISTER_OCRAM_SECTOR_SLOT with MISTER_OCRAM_DIAG|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_DIAG -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_MASTER
+ok|-|the master with MISTER_OCRAM_SECTOR_SLOT|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_MASTER
+bad|sector_slot_on_two_feeders|the LW SECTOR block and the OCRAM feeder on one window|-DMISTER_LW -DMISTER_LW_SECTOR_SLOT=1 -DXO_WIN
+bad|ocram_sector_unservable_geometry|an OCRAM SECTOR frame of 0 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=0 -DXO_GAP=2
+bad|ocram_sector_unservable_geometry|an OCRAM SECTOR frame of 4097 words|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=4097 -DXO_GAP=2
+bad|ocram_sector_unservable_geometry|an OCRAM SECTOR gap of 1|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=588 -DXO_GAP=1
+bad|ocram_sector_unservable_geometry|an OCRAM SECTOR gap of 16|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=588 -DXO_GAP=16
+ok|-|the OCRAM SECTOR edges: 4096 words, gap 15|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=4096 -DXO_GAP=15
+ok|-|the OCRAM SECTOR edges: 1 word, gap 2|-DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=1 -DXO_RX -DXO_FRAME=1 -DXO_GAP=2
+EOG
   echo "-- no tier macro" >> "$1"
   iverilog -g2012 -I sys -s lw_x_top -o "$O/lw_x.vvp" "$O/lw_x_top.sv" sys/hps_io.sv > "$O/lw_x.err" 2>&1
   r=$?; n=$((n + 1))
@@ -280,6 +459,20 @@ EOS
     elif [ $r -eq 0 ]; then echo "pass slot $k: compiles" >> "$1"
     else f=$((f + 1)); echo "FAIL Template, slot $k: does not compile" >> "$1"; grep -i error "$O/lw_xt.err" | head -5 | sed 's/^/   /' >> "$1"
     fi
+  done
+  # the same reader on the OCRAM SECTOR tier (WIDE strobes, BLKSZ 3): it compiles on slot 3 and stops on slot 0
+  for t in ok:3 bad:0; do
+    want=${t%%:*}; k=${t#*:}
+    echo "-- Template: the block reader on the OCRAM SECTOR tier, hps_io slot $k" >> "$1"
+    iverilog -g2012 -DMISTER_LW -DMISTER_OCRAM -DMISTER_OCRAM_SECTOR_SLOT=$k -DMISTER_OCRAM_BLKSZ=3 -I "$O" -I sys \
+      -s emu -o "$O/lw_xt.vvp" Template.sv sys/hps_io.sv sys/lw_blk_mux.sv rtl/mycore.v rtl/lfsr.v \
+      "$O/lw_xt_stubs.sv" > "$O/lw_xt.err" 2>&1
+    r=$?; n=$((n + 1)); g=$(grep -c lw_template_block_slot_1_to_9 "$O/lw_xt.err")
+    if [ "$want" = bad ]; then
+      if [ $r -ne 0 ] && [ "$g" -gt 0 ]; then echo "pass OCRAM slot $k: stops, naming the guard" >> "$1"
+      else f=$((f + 1)); echo "FAIL Template, OCRAM slot $k: status $r, the guard $g times in the errors" >> "$1"; fi
+    elif [ $r -eq 0 ]; then echo "pass OCRAM slot $k: compiles" >> "$1"
+    else f=$((f + 1)); echo "FAIL Template, OCRAM slot $k: does not compile" >> "$1"; grep -i error "$O/lw_xt.err" | head -5 | sed 's/^/   /' >> "$1"; fi
   done
   if [ $f -eq 0 ]; then echo "PASSED: $n checks, 0 failures" >> "$1"; else echo "FAILED: $n checks, $f failures" >> "$1"; fi
 }
@@ -383,6 +576,37 @@ for g in $ARMS; do
 "
     continue
   fi
+  if [ "$g" = O ]; then
+    echo "== arm O: tb/ocram_tb.sv, every seed, plain and with the CDC models; verilator lint"
+    ocram "$O/ocram_tbO.log"
+    grep -v "^pass " "$O/ocram_tbO.log"
+    V=$(verdict O "$O/ocram_tbO.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = Q ]; then
+    echo "== arm Q: tb/confstr_tb.sv, the CONF_STR readout from logic and from block RAM"
+    awk '/^reg \[MAX_W:0\] byte_cnt;/ { next } /^wire \[7:0\] conf_byte;/ { print "reg [MAX_W:0] byte_cnt;" } { print }' \
+      sys/hps_io.sv > "$O/confstrQ_hps_io.sv"
+    if iverilog -g2012 -I tb -I sys -o "$O/confstrQ.vvp" tb/confstr_tb.sv "$O/confstrQ_hps_io.sv" > "$O/confstrQ.err" 2>&1
+    then vvp -n "$O/confstrQ.vvp" > "$O/confstr_tbQ.log" 2>&1
+    else { echo "FAIL bench: does not compile"; head -20 "$O/confstrQ.err"; } > "$O/confstr_tbQ.log"; fi
+    grep -v "^pass " "$O/confstr_tbQ.log"
+    V=$(verdict Q "$O/confstr_tbQ.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
+  if [ "$g" = C ]; then
+    echo "== arm C: tb/sfeed_tb.sv, lw_sector against the OCRAM SECTOR feeder, cycle for cycle"
+    sfeedc "$O/sfeed_tbC.log"
+    grep -v "^pass " "$O/sfeed_tbC.log" | grep -v '^== seed'
+    V=$(verdict C "$O/sfeed_tbC.log") || rc=1
+    R="$R$V
+"
+    continue
+  fi
   if [ "$g" = V ]; then
     echo "== arm V: slang"
     if ! command -v slang >/dev/null 2>&1; then V="arm V: SKIPPED (no slang on PATH)"
@@ -422,6 +646,7 @@ for g in $ARMS; do
     G) D="$B $A -DLW_DIAG=0 -DLW_TB_DEFGEOM";;
     W) D="$B $A -DLW_DIAG=0 -DLW_TB_GEOMW";;
     L) D="$B $L";;
+    P) D="$B $A -DLW_DIAG=0 -DMISTER_DISABLE_SPI_PAD";;
     R12) D="$B $C -DLW_TB_SYS_HP_PS=41667";;
     R20) D="$B $C -DLW_TB_SYS_HP_PS=25000";;
     R21) D="$B $C -DLW_TB_SYS_HP_PS=23281";;
