@@ -392,7 +392,7 @@ wire [127:0] status_in = {status[127:39],ss_slot,status[36:19], 2'b00, status[16
 wire bk_pending;
 wire DIRECT_VIDEO;
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(1), .WIDE(1), .VDNUM(4), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_1x),
 	.HPS_BUS(HPS_BUS),
@@ -897,15 +897,21 @@ end
 
 ////////////////////////////  SYSTEM  ///////////////////////////////////
 
-// CD sectors on hps_io slot 1, memory cards on slots 2 and 3. With the LW SECTOR block (PSX.qsf's
-// MISTER_LW_SECTOR_SLOT and save-slot macros) a mux per slot hands it to the block while the host's EN for the
-// slot is set (sys/lw_blk_mux.sv, docs/LW_BRIDGE.md "Hooking the SECTOR block"); without it the wiring is stock.
+// CD sectors on hps_io slot 1, memory cards on slots 2 and 3. With a SECTOR feeder for the CD (the LW SECTOR block,
+// MISTER_LW_SECTOR_SLOT, or the OCRAM mailbox's, MISTER_OCRAM_SECTOR_SLOT) the slot's mux hands it to the feeder
+// while its bind is set (sys/lw_blk_mux.sv, docs/LW_BRIDGE.md "Hooking the SECTOR block"); the cards take a mux
+// only with the LW save-slot macros. Without them the wiring is stock.
+`ifdef MISTER_LW_SECTOR_SLOT
+`define PSX_CD_FEEDER
+`elsif MISTER_OCRAM_SECTOR_SLOT
+`define PSX_CD_FEEDER
+`endif
 wire        cd_req, cd_ack, cd_wr;
 wire [15:0] cd_data;
 wire        mc1_rd, mc1_wr, mc1_ack, mc1_write, mc2_rd, mc2_wr, mc2_ack, mc2_write;
 wire  [8:0] mc1_addr, mc2_addr;
 wire [15:0] mc1_din, mc2_din;
-`ifdef MISTER_LW_SECTOR_SLOT
+`ifdef PSX_CD_FEEDER
 lw_blk_mux cd_lw
 (
    .HPS_BUS(HPS_BUS), .reset(reset),

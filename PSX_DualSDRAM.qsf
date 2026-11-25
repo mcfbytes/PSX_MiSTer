@@ -65,30 +65,24 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
-# LW bridge framework (docs/LW_BRIDGE.md): the HPS lightweight-bridge window beside hps_io. Without MISTER_LW
-# sys/ and PSX.sv compile as stock. Tiers: pads, the status/event causes, the OSD image, and the SECTOR block
-# serving the CD (hps_io slot 1, one 2352-byte raw sector = 588 words a frame, BLKSZ 3) and both memory cards
-# (slots 2 and 3, 1 KB frames, 7-bit LBAs, images in DDR where psx_top's arbiter puts them). No frame lane.
+# LW bridge + OCRAM mailbox (docs/LW_BRIDGE.md, docs/OCRAM_MAILBOX.md): the default disc-core set, "LW pads, OCRAM
+# bulk, SPI status". Without these macros sys/ and PSX.sv compile as stock. LW carries the pads only; the mailbox
+# carries the OSD image and the CD (hps_io slot 1, one 2352-byte raw sector = 588 words a frame, BLKSZ 3). Status,
+# events and both memory cards stay on the link. PROVISIONAL (test builds).
 set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_EVT=1"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_OSD=1"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_SLOT=1"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_FRAME=588"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SECTOR_GAP=2"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_BLKSZ=3"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_SLOT=2"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_WSRC=32'h30100000"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_EXTENT=32'h00020000"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_FRAME=256"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE0_LBA_BITS=7"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_SLOT=3"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_WSRC=32'h30200000"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_EXTENT=32'h00020000"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_FRAME=256"
-set_global_assignment -name VERILOG_MACRO "MISTER_LW_SAVE1_LBA_BITS=7"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_OSD=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_SLOT=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_FRAME=588"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_GAP=2"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_BLKSZ=3"
 
-# LW window diagnostics (SCRATCH, SECTOR counters/timestamps): 0 = shipping, 1 = debug builds
+# Area-critical only, never a default: compiles out the link's pad write arms. A stock HPS binary then has no pad
+# input on this core (keyboard and mouse still work). Needs MISTER_LW_PAD.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_PAD=1"
+
+# LW window diagnostics (SCRATCH): 0 = shipping, 1 = debug builds
 set_global_assignment -name VERILOG_MACRO "LW_DIAG=0"
 
 source sys/sys.tcl
