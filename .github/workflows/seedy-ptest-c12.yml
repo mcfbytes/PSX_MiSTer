@@ -1,0 +1,28 @@
+# Seedy parallelism test (2026-11-25), 12 PSX compiles at once on one Azure D32as_v7 (32 vCPU, 128 GB).
+# Four of these files (4, 8, 12, 16 at once) start on the same push; their compile jobs queue for the single
+# seedy-azure VM and run one after another. No early stop and no overlapping seeds: 40 compiles, all data.
+# Compare compiles per hour, per-compile time and memory (seedy-results) with the VM's load and memory.
+name: Seedy ptest 12 at once
+
+on:
+  push:
+    branches: [seedy-azure-test]
+
+permissions:
+  contents: read
+
+jobs:
+  seedy:
+    uses: mcfbytes/Seedy_MiSTer/.github/workflows/seedy.yml@5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
+    with:
+      mode: hunt
+      project: PSX
+      seeds: "13-24"
+      per_job_concurrency: "12"
+      min_met: 999           # never stop early: every seed is a measurement
+      hunt_minutes: 600
+      jobs: "1"
+      runs_on: '["self-hosted", "linux", "seedy-azure"]'
+      job_timeout_minutes: 300
+      keep_rbf: none
+      seedy_ref: 5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
