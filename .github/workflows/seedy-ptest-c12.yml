@@ -13,6 +13,10 @@ permissions:
 
 jobs:
   seedy:
+    # what Seedy's jobs may ask for (as in its template); a hunt with override_seed never writes nothing
+    permissions:
+      contents: write
+      actions: read
     uses: mcfbytes/Seedy_MiSTer/.github/workflows/seedy.yml@5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
     with:
       mode: hunt
