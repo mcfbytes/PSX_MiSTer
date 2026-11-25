@@ -70,8 +70,9 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
 
 # LW bridge + OCRAM mailbox (docs/LW_BRIDGE.md, docs/OCRAM_MAILBOX.md): the default disc-core set, "LW pads, OCRAM
 # bulk, SPI status". Without these macros sys/ and PSX.sv compile as stock. LW carries the pads only; the mailbox
-# carries the OSD image and the CD (hps_io slot 1, one 2352-byte raw sector = 588 words a frame, BLKSZ 3). Status,
-# events and both memory cards stay on the link. PROVISIONAL (test builds).
+# carries the OSD image, the CD (hps_io slot 1, one 2352-byte raw sector = 588 words a frame, BLKSZ 3), both memory
+# cards as mount slots (hps_io slots 2, 3: one 1,024-byte block = 256 words) and downloads (ring 1). Status and
+# events stay on the link. PROVISIONAL (test builds).
 set_global_assignment -name VERILOG_MACRO "MISTER_LW=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_LW_PAD=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM=1"
@@ -80,10 +81,19 @@ set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_SLOT=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_FRAME=588"
 set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_SECTOR_GAP=2"
 set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_BLKSZ=3"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT0_SLOT=2"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT1_SLOT=3"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_MOUNT_FRAME=256"
+set_global_assignment -name VERILOG_MACRO "MISTER_OCRAM_FIO=1"
 
 # Area-critical only, never a default: compiles out the link's pad write arms. A stock HPS binary then has no pad
 # input on this core (keyboard and mouse still work). Needs MISTER_LW_PAD.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_PAD=1"
+# Compile out the link's OSD row writes (the image rides ring 2) and its block arms 0x16-0x18: slots 1-3 are on
+# mailbox tiers, slot 0 is unused (mask 1). A stock HPS binary then has no OSD image and no CD or card on this core.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_OSD=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_BLK=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_BLK_UNUSED=1"
 
 # LW window diagnostics (SCRATCH): 0 = shipping, 1 = debug builds
 set_global_assignment -name VERILOG_MACRO "LW_DIAG=0"

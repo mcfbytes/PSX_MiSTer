@@ -899,12 +899,23 @@ end
 
 // CD sectors on hps_io slot 1, memory cards on slots 2 and 3. With a SECTOR feeder for the CD (the LW SECTOR block,
 // MISTER_LW_SECTOR_SLOT, or the OCRAM mailbox's, MISTER_OCRAM_SECTOR_SLOT) the slot's mux hands it to the feeder
-// while its bind is set (sys/lw_blk_mux.sv, docs/LW_BRIDGE.md "Hooking the SECTOR block"); the cards take a mux
-// only with the LW save-slot macros. Without them the wiring is stock.
+// while its bind is set (sys/lw_blk_mux.sv, docs/LW_BRIDGE.md "Hooking the SECTOR block"); each card takes an
+// lw_save_mux with its LW save-slot macro or its OCRAM mount-slot macro, the mount slot's buffer word read back
+// through core_din. Without them the wiring is stock.
 `ifdef MISTER_LW_SECTOR_SLOT
 `define PSX_CD_FEEDER
 `elsif MISTER_OCRAM_SECTOR_SLOT
 `define PSX_CD_FEEDER
+`endif
+`ifdef MISTER_LW_SAVE0_SLOT
+`define PSX_MC1_MUX
+`elsif MISTER_OCRAM_MOUNT0_SLOT
+`define PSX_MC1_MUX
+`endif
+`ifdef MISTER_LW_SAVE1_SLOT
+`define PSX_MC2_MUX
+`elsif MISTER_OCRAM_MOUNT1_SLOT
+`define PSX_MC2_MUX
 `endif
 wire        cd_req, cd_ack, cd_wr;
 wire [15:0] cd_data;
@@ -926,13 +937,14 @@ assign cd_wr    = sd_buff_wr;
 assign cd_data  = sd_buff_dout;
 `endif
 
-`ifdef MISTER_LW_SAVE0_SLOT
+`ifdef PSX_MC1_MUX
 wire [13:0] mc1_addr_w;
 assign mc1_addr = mc1_addr_w[8:0];
 lw_save_mux #(.SAVE(0)) mc1_lw
 (
    .HPS_BUS(HPS_BUS),
-   .core_rd(mc1_rd), .core_wr(mc1_wr), .core_lba({25'd0, sd_lba2}), .core_ack(mc1_ack), .core_write(mc1_write),
+   .core_rd(mc1_rd), .core_wr(mc1_wr), .core_lba({25'd0, sd_lba2}), .core_din(sd_buff_din2), .core_ack(mc1_ack),
+   .core_write(mc1_write),
    .core_addr(mc1_addr_w), .core_data(mc1_din),
    .hps_rd(sd_rd[2]), .hps_wr(sd_wr[2]), .hps_ack(sd_ack[2]), .hps_write(sd_buff_wr), .hps_addr({5'd0, sd_buff_addr}),
    .hps_data(sd_buff_dout)
@@ -946,13 +958,14 @@ assign mc1_addr  = sd_buff_addr;
 assign mc1_din   = sd_buff_dout;
 `endif
 
-`ifdef MISTER_LW_SAVE1_SLOT
+`ifdef PSX_MC2_MUX
 wire [13:0] mc2_addr_w;
 assign mc2_addr = mc2_addr_w[8:0];
 lw_save_mux #(.SAVE(1)) mc2_lw
 (
    .HPS_BUS(HPS_BUS),
-   .core_rd(mc2_rd), .core_wr(mc2_wr), .core_lba({25'd0, sd_lba3}), .core_ack(mc2_ack), .core_write(mc2_write),
+   .core_rd(mc2_rd), .core_wr(mc2_wr), .core_lba({25'd0, sd_lba3}), .core_din(sd_buff_din3), .core_ack(mc2_ack),
+   .core_write(mc2_write),
    .core_addr(mc2_addr_w), .core_data(mc2_din),
    .hps_rd(sd_rd[3]), .hps_wr(sd_wr[3]), .hps_ack(sd_ack[3]), .hps_write(sd_buff_wr), .hps_addr({5'd0, sd_buff_addr}),
    .hps_data(sd_buff_dout)
