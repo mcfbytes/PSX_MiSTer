@@ -1,7 +1,9 @@
 # MiSTer Seedy fan-out seed hunt for PSX on the seedy-rg Azure scale set (mcfbytes/PSX_MiSTer fork only).
 #
-# Start a hunt: push to this branch with "[seedy hunt]" in the head commit's message. Other pushes (including
-# this file's) start nothing, so nothing is billed by accident. A new push cancels a hunt still running.
+# Start a hunt: push to this branch a head commit whose subject line starts with "[seedy hunt]", e.g.
+#   git commit --allow-empty -m "[seedy hunt] <what changed>"
+# Any other push starts nothing (a mention of the tag elsewhere in a message doesn't count), so nothing is billed
+# by accident. A new hunt push cancels a hunt still running.
 # Before pushing, scale the VMs up (they delete themselves 10 minutes after their last job):
 #   az vmss scale -g seedy-rg -n seedy-runners --new-capacity 16
 #
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   seedy:
-    if: contains(github.event.head_commit.message, '[seedy hunt]')
+    if: startsWith(github.event.head_commit.message, '[seedy hunt]')
     concurrency:
       group: seedy-hunt-${{ github.ref }}
       cancel-in-progress: true
