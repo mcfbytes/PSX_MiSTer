@@ -40,6 +40,21 @@
 // LW_EVT_X: the events tier (MISTER_LW_EVT, with MISTER_LW) exports uio_block's core->host flags.
 `define LW_EVT_X
 `endif
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_EVT
+// LW_OCRAM_EVT_X: the OCRAM events tier (MISTER_OCRAM_EVT) offers them on one event port in the same span.
+`define LW_OCRAM_EVT_X
+`endif
+`endif
+`endif
+// LW_UIO_FLAGS_X: uio_block's flag registers are declared at module scope, for either tier's exports.
+`ifdef LW_EVT_X
+`define LW_UIO_FLAGS_X
+`endif
+`ifdef LW_OCRAM_EVT_X
+`ifndef LW_UIO_FLAGS_X
+`define LW_UIO_FLAGS_X
+`endif
 `endif
 
 //
@@ -238,12 +253,14 @@ wire  [7:0] lw_op    = HPS_BUS[93:86];
 wire  [7:0] lw_idx   = HPS_BUS[85:78];
 wire [31:0] lw_dat   = HPS_BUS[77:46];
 assign HPS_BUS[375] = 1'b1;
+`ifdef MISTER_LW_KBM
+// MISTER_LW_KBM (PROVISIONAL): a key frame store holds the frame's bytes as ps2_key_raw would, last byte lowest
+wire        lw_pressed  = (lw_dat[15:8] != 8'hf0);
+wire        lw_extended = (~lw_pressed ? (lw_dat[23:16] == 8'he0) : (lw_dat[15:8] == 8'he0));
+`endif
 `endif
 
-`ifdef LW_EVT_X
-// The core->host flags, exported to sys_top's LW EVT block (lw_evt.sv): HPS_BUS[239:237] one-cycle pulses
-// {upload, info, blk} from the edges uio_block uses, [371:240] the 0x29 flag and snapshot {status_req, stflg},
-// [374:372] the levels {upload pending, info pending, a block request stands}, [376] the exports are present.
+`ifdef LW_UIO_FLAGS_X
 // uio_block's own registers, declared here so the exports can read them:
 reg   [3:0] stflg = 0;
 reg [127:0] status_req = 0;
@@ -251,6 +268,11 @@ reg         old_upload_req = 0;
 reg         upload_req = 0;
 reg         old_info = 0;
 reg   [7:0] info_n = 0;
+`endif
+`ifdef LW_EVT_X
+// The core->host flags, exported to sys_top's LW EVT block (lw_evt.sv): HPS_BUS[239:237] one-cycle pulses
+// {upload, info, blk} from the edges uio_block uses, [371:240] the 0x29 flag and snapshot {status_req, stflg},
+// [374:372] the levels {upload pending, info pending, a block request stands}, [376] the exports are present.
 // blk: a rise of a slot's request, or a fall of its SPI ack that leaves the request raised
 wire [VD:0] ev_rq = sd_rd | sd_wr;
 reg  [VD:0] ev_rq_d = 0, ev_ack_d = 0;
@@ -262,6 +284,37 @@ assign HPS_BUS[239:237] = {~old_upload_req & ioctl_upload_req, ~old_info & info_
                            |((ev_rq & ~ev_rq_d) | (ev_ack_d & ~sd_ack & ev_rq))};
 assign HPS_BUS[371:240] = {status_req, stflg};
 assign HPS_BUS[374:372] = {upload_req, info_n != 8'd0, |ev_rq};
+assign HPS_BUS[376] = 1'b1;
+`endif
+`ifdef LW_OCRAM_EVT_X
+// The OCRAM events tier's event port (hps_ocram_evt, sys/hps_ocram_master.sv): one offer at a time, the rotor's
+// item, HPS_BUS[374:333] = {kind[1:0], arg[7:0], data[31:0]}: ev_rot 0-3 STATUS (kind 0) word ev_rot, arg
+// {word[1:0], 0, stflg}, data status_req's word; 4 INFO (1), arg info_n (0: no notice); 5 UPLOAD (2), arg
+// ioctl_upload_index, or INFO with arg 0 while none is pending; 6-11 RUMBLE (3) pad ev_rot - 6, data its level.
+// HPS_BUS[382] (sys_top's take, the cycle the offer is captured) steps the rotor and spends a taken notice (in
+// uio_block; an edge in that cycle still latches). [376]: the port is present.
+wire        ev_take = HPS_BUS[382];
+reg   [3:0] ev_rot = 4'd0;
+always @(posedge clk_sys) if (ev_take) ev_rot <= (ev_rot == 4'd11) ? 4'd0 : ev_rot + 4'd1;
+reg  [15:0] ev_rum;
+always @(*) begin
+	case (ev_rot)
+		4'd6:    ev_rum = joystick_0_rumble;
+		4'd7:    ev_rum = joystick_1_rumble;
+		4'd8:    ev_rum = joystick_2_rumble;
+		4'd9:    ev_rum = joystick_3_rumble;
+		4'd10:   ev_rum = joystick_4_rumble;
+		default: ev_rum = joystick_5_rumble;
+	endcase
+end
+wire  [3:0] ev_pad  = ev_rot - 4'd6;
+wire  [1:0] ev_kind = (ev_rot < 4'd4) ? 2'd0 : (ev_rot == 4'd4 || (ev_rot == 4'd5 && !upload_req)) ? 2'd1 :
+                      (ev_rot == 4'd5) ? 2'd2 : 2'd3;
+wire  [7:0] ev_arg  = (ev_rot < 4'd4) ? {ev_rot[1:0], 2'b00, stflg} : (ev_rot == 4'd4) ? info_n :
+                      (ev_rot == 4'd5) ? (upload_req ? ioctl_upload_index : 8'd0) : {4'd0, ev_pad};
+wire [31:0] ev_data = (ev_rot < 4'd4) ? status_req[{ev_rot[1:0], 5'd0} +: 32] :
+                      (ev_rot >= 4'd6) ? {16'd0, ev_rum} : 32'd0;
+assign HPS_BUS[374:333] = {ev_kind, ev_arg, ev_data};
 assign HPS_BUS[376] = 1'b1;
 `endif
 `else
@@ -297,10 +350,53 @@ ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount0_guard();
 ocram_mount_needs_MISTER_OCRAM_SECTOR_SLOT ocram_mount1_guard();
 `endif
 `endif
+// LW_OCRAM_MNT_HPS: the OCRAM mount slots are built (either mount macro, with MISTER_OCRAM). Their block length is
+// MISTER_OCRAM_BLKSZ's (sys_top.v, default 2), so it must be this instance's BLKSZ, or the build stops here.
+`ifdef MISTER_OCRAM
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+`define LW_OCRAM_MNT_HPS
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+`ifndef LW_OCRAM_MNT_HPS
+`define LW_OCRAM_MNT_HPS
+`endif
+`endif
+`endif
+`ifdef LW_OCRAM_MNT_HPS
+`ifdef MISTER_OCRAM_BLKSZ
+localparam integer MNT_BLKSZ = `MISTER_OCRAM_BLKSZ;
+`else
+localparam integer MNT_BLKSZ = 2;
+`endif
+generate
+	if (MNT_BLKSZ != BLKSZ) begin : ocram_blksz
+		ocram_blksz_differs_from_hps_io guard();
+	end
+endgenerate
+`endif
 // MISTER_DISABLE_SPI_PAD compiles out the link's pad arms; without the LW pad tier a core would have no pad path.
 `ifdef MISTER_DISABLE_SPI_PAD
 `ifndef MISTER_LW_PAD
 spi_pad_off_needs_MISTER_LW_PAD spi_pad_guard();
+`endif
+`endif
+// MISTER_LW_KBM (PROVISIONAL) puts the keys, the mouse and the analog triggers on the LW PAD block, so it needs that
+// block; a PS2DIV core's keys and mouse are byte streams into its PS/2 devices, which a store cannot feed.
+`ifdef MISTER_LW_KBM
+`ifndef MISTER_LW_PAD
+lw_kbm_needs_MISTER_LW_PAD lw_kbm_guard();
+`endif
+generate
+	if (PS2DIV != 0) begin : lw_kbm_ps2div
+		lw_kbm_on_a_PS2DIV_core guard();
+	end
+endgenerate
+`endif
+// MISTER_DISABLE_SPI_KBM (PROVISIONAL) compiles out the link's 0x04, 0x05 and 0x46 arms and ps2_key_raw; without the
+// LW key tier a core would have no key, mouse or trigger path.
+`ifdef MISTER_DISABLE_SPI_KBM
+`ifndef MISTER_LW_KBM
+spi_kbm_off_needs_MISTER_LW_KBM spi_kbm_guard();
 `endif
 `endif
 // MISTER_DISABLE_SPI_BLK compiles out the link's block arms (0x16-0x18). Every slot below VDNUM is on a mailbox block
@@ -336,6 +432,10 @@ generate
 	if ((BLK_TIER & BLK_UNUSED) != 16'd0) begin : spi_blk_unused
 		spi_blk_off_unused_slot_on_a_tier guard();
 	end
+	// a tier slot at or above VDNUM: the core has no such slot, and BLK_ALL would leave it out unseen
+	if ((BLK_TIER & ~BLK_ALL) != 16'd0) begin : spi_blk_vdnum
+		spi_blk_off_tier_slot_outside_vdnum guard();
+	end
 endgenerate
 `endif
 // The LW frame lane and the OCRAM download tier each put a player on the link nets through lw_link: one a build.
@@ -344,6 +444,53 @@ endgenerate
 `ifdef MISTER_OCRAM_FIO
 link_on_two_players link_guard();
 `endif
+`endif
+`endif
+// MISTER_OCRAM_EVT: its port takes the LW events tier's span of HPS_BUS (so MISTER_LW, and never beside
+// MISTER_LW_EVT) and its records are the SECTOR tier's record writer's. MISTER_DISABLE_SPI_EVT compiles out the
+// link's event replies (0x29, 0x36, 0x3C, 0x3F); without the OCRAM events tier they would have no path.
+`ifdef MISTER_OCRAM_EVT
+`ifndef MISTER_LW
+ocram_evt_needs_MISTER_LW ocram_evt_lw_guard();
+`endif
+`ifdef MISTER_LW_EVT
+evt_on_two_tiers ocram_evt_two_guard();
+`endif
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT ocram_evt_sec_guard();
+`endif
+`else
+ocram_evt_needs_MISTER_OCRAM_SECTOR_SLOT ocram_evt_sec_guard();
+`endif
+`endif
+`ifdef MISTER_DISABLE_SPI_EVT
+`ifndef LW_OCRAM_EVT_X
+spi_evt_off_needs_MISTER_OCRAM_EVT spi_evt_guard();
+`endif
+`endif
+// MISTER_OCRAM_UIO widens the OCRAM download tier's player to the UIO and OSD selects: without it there is no player.
+`ifdef MISTER_OCRAM_UIO
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`else
+ocram_uio_needs_MISTER_OCRAM_FIO ocram_uio_guard();
+`endif
+`endif
+// MISTER_OCRAM_LANE captures the replies of the download tier's frames into REPLY records, which the SECTOR tier's
+// record writer writes: without either there is no frame or no writer.
+`ifdef MISTER_OCRAM_LANE
+`ifdef MISTER_OCRAM
+`ifndef MISTER_OCRAM_FIO
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
+`endif
+`ifndef MISTER_OCRAM_SECTOR_SLOT
+ocram_lane_needs_MISTER_OCRAM_SECTOR_SLOT ocram_lane_sec_guard();
+`endif
+`else
+ocram_lane_needs_MISTER_OCRAM_FIO ocram_lane_guard();
 `endif
 `endif
 
@@ -414,9 +561,11 @@ reg        gamma_wr;
 reg  [9:0] gamma_wr_addr;
 reg  [7:0] gamma_value;
 
+`ifndef MISTER_DISABLE_SPI_KBM
 reg [31:0] ps2_key_raw = 0;
 wire       pressed  = (ps2_key_raw[15:8] != 8'hf0);
 wire       extended = (~pressed ? (ps2_key_raw[23:16] == 8'he0) : (ps2_key_raw[15:8] == 8'he0));
+`endif
 
 reg [MAX_W:0] byte_cnt;
 reg   [3:0] sdn_ack;
@@ -512,23 +661,63 @@ end
 // synthesis translate_on
 `endif
 
+`ifdef LW_OCRAM_MNT_HPS
+// The mount slots carry no blk_cnt to the mailbox (sys_top.v ties xm_cnt to 0): a request of more than one block is
+// served as one. Checked in simulation, with or without MISTER_DISABLE_SPI_BLK: a mount slot below VDNUM requests
+// only with sd_blk_cnt 0, on this module's view and on the save mux's core rd and wr bits. Reported once a slot.
+// synthesis translate_off
+`ifdef MISTER_OCRAM_MOUNT0_SLOT
+localparam integer MNT_S0 = `MISTER_OCRAM_MOUNT0_SLOT;
+`else
+localparam integer MNT_S0 = 16;
+`endif
+`ifdef MISTER_OCRAM_MOUNT1_SLOT
+localparam integer MNT_S1 = `MISTER_OCRAM_MOUNT1_SLOT;
+`else
+localparam integer MNT_S1 = 16;
+`endif
+`ifdef MISTER_LW
+wire [1:0] mnt_mrq = {HPS_BUS[204] | HPS_BUS[203], HPS_BUS[169] | HPS_BUS[168]};
+`else
+wire [1:0] mnt_mrq = 2'b00;
+`endif
+reg [VD:0] mnt_said = 0;
+always @(posedge clk_sys) begin : mnt_word
+	integer i;
+	for (i = 0; i < VDNUM; i = i + 1)
+		if ((i == MNT_S0 || i == MNT_S1) && sd_blk_cnt[i] != 6'd0 && !mnt_said[i] &&
+		    ((sd_rd[i] | sd_wr[i]) === 1'b1 || (i == MNT_S0 && mnt_mrq[0] === 1'b1) ||
+		     (i == MNT_S1 && mnt_mrq[1] === 1'b1))) begin
+			mnt_said[i] <= 1'b1;
+			$display({"FAIL hps_io: MISTER_OCRAM_MOUNT_SLOT: mount slot %0d requests with sd_blk_cnt %0d; a mount ",
+			          "request is one block"}, i, sd_blk_cnt[i]);
+		end
+end
+// synthesis translate_on
+`undef LW_OCRAM_MNT_HPS
+`endif
+
 always@(posedge clk_sys) begin : uio_block
 	reg [15:0] cmd;
 	reg  [2:0] b_wr;
 	reg  [3:0] stick_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg  [7:0] atrig_idx;
+`endif
 	reg  [3:0] pdsp_idx;
+`ifndef MISTER_DISABLE_SPI_KBM
 	reg        ps2skip = 0;
-`ifndef LW_EVT_X
+`endif
+`ifndef LW_UIO_FLAGS_X
 	reg  [3:0] stflg = 0;
 	reg[127:0] status_req;
 `endif
 	reg        old_status_set = 0;
-`ifndef LW_EVT_X
+`ifndef LW_UIO_FLAGS_X
 	reg        old_upload_req = 0;
 `endif
 	reg [47:0] ffb_data;
-`ifndef LW_EVT_X
+`ifndef LW_UIO_FLAGS_X
 	reg        upload_req = 0;
 	reg        old_info = 0;
 	reg  [7:0] info_n = 0;
@@ -543,6 +732,11 @@ always@(posedge clk_sys) begin : uio_block
 		status_req <= status_in;
 	end
 
+`ifdef LW_OCRAM_EVT_X
+	// the event port took this notice; an edge in the same cycle latches the next one below
+	if(ev_take && ev_rot == 4'd5) upload_req <= 0;
+	if(ev_take && ev_rot == 4'd4) info_n <= 0;
+`endif
 	old_upload_req <= ioctl_upload_req;
 	if(~old_upload_req & ioctl_upload_req) upload_req <= 1;
 
@@ -558,6 +752,7 @@ always@(posedge clk_sys) begin : uio_block
 	gamma_wr <= 0;
 
 	if(~io_enable) begin
+`ifndef MISTER_DISABLE_SPI_KBM
 		if(cmd == 4 && !ps2skip) ps2_mouse[24] <= ~ps2_mouse[24];
 		if(cmd == 5 && !ps2skip) begin
 			ps2_key <= {~ps2_key[10], pressed, extended, ps2_key_raw[7:0]};
@@ -565,13 +760,16 @@ always@(posedge clk_sys) begin : uio_block
 			if(ps2_key_raw == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
 			if(ps2_key_raw == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
 		end
+`endif
 		if(cmd == 'h22) RTC[64] <= ~RTC[64];
 		if(cmd == 'h24) TIMESTAMP[32] <= ~TIMESTAMP[32];
 		cmd <= 0;
 		byte_cnt <= 0;
 		sd_ack <= 0;
 		io_dout <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 		ps2skip <= 0;
+`endif
 		img_mounted <= 0;
 	end
 	else if(io_strobe) begin
@@ -588,17 +786,23 @@ always@(posedge clk_sys) begin : uio_block
 				'h0X17,
 				'h0X18: begin sd_ack <= disk[VD:0]; sdn_ack <= io_din[11:8]; end
 `endif
+`ifndef MISTER_DISABLE_SPI_EVT
 				  'h29: io_dout <= {4'hA, stflg};
+`endif
 				  'h32: io_dout <= gamma_bus[21];
+`ifndef MISTER_DISABLE_SPI_EVT
 				  'h36: begin io_dout <= info_n; info_n <= 0; end
 				  'h3C: if(upload_req) begin io_dout <= {ioctl_upload_index, 8'd1}; upload_req <= 0; end				  
+`endif
 				  'h43: io_dout <= |F12KEYMOD;
+`ifndef MISTER_DISABLE_SPI_EVT
 				'h003F: io_dout <= joystick_0_rumble;
 				'h013F: io_dout <= joystick_1_rumble;
 				'h023F: io_dout <= joystick_2_rumble;
 				'h033F: io_dout <= joystick_3_rumble;
 				'h043F: io_dout <= joystick_4_rumble;
 				'h053F: io_dout <= joystick_5_rumble;
+`endif
 				'h0045: if(FFB) begin io_dout <= {8'hFB, joystick_0_ffb[55:48]}; ffb_data <= joystick_0_ffb[47:0]; end
 				'h0145: if(FFB) begin io_dout <= {8'hFB, joystick_1_ffb[55:48]}; ffb_data <= joystick_1_ffb[47:0]; end
 				'h0245: if(FFB) begin io_dout <= {8'hFB, joystick_2_ffb[55:48]}; ffb_data <= joystick_2_ffb[47:0]; end
@@ -608,7 +812,9 @@ always@(posedge clk_sys) begin : uio_block
 			endcase
 
 			sd_buff_addr <= 0;
+`ifndef MISTER_DISABLE_SPI_KBM
 			if(io_din == 5) ps2_key_raw <= 0;
+`endif
 		end else begin
 
 			casex(cmd)
@@ -630,6 +836,7 @@ always@(posedge clk_sys) begin : uio_block
 							3: io_dout <= ffb_data[15:0];
 						endcase
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// store incoming ps2 mouse bytes
 				'h04: begin
 							if(PS2DIV) begin
@@ -660,6 +867,7 @@ always@(posedge clk_sys) begin : uio_block
 								kbd_we <= 1;
 							end
 						end
+`endif
 
 				// reading config string, returning a byte from string
 				'h14: if(byte_cnt <= STRLEN) io_dout[7:0] <= conf_byte;
@@ -734,6 +942,7 @@ always@(posedge clk_sys) begin : uio_block
 						end
 `endif
 
+`ifndef MISTER_DISABLE_SPI_KBM
 				// 0x46: player, {RT, LT}
 				'h46: case(byte_cnt)
 							1: atrig_idx <= io_din[7:0];
@@ -746,6 +955,7 @@ always@(posedge clk_sys) begin : uio_block
 									5: {joystick_rt_analog_5, joystick_lt_analog_5} <= io_din;
 								endcase
 						endcase
+`endif
 
 				// notify image selection
 				'h1c: begin
@@ -795,6 +1005,7 @@ always@(posedge clk_sys) begin : uio_block
 				//RTC
 				'h24: TIMESTAMP[(byte_cnt-6'd1)<<4 +:16] <= io_din;
 
+`ifndef MISTER_DISABLE_SPI_EVT
 				//status set
 				'h29: if(!byte_cnt[MAX_W:4]) begin
 							case(byte_cnt[3:0])
@@ -808,6 +1019,7 @@ always@(posedge clk_sys) begin : uio_block
 								8: io_dout <= status_req[127:112];
 							endcase
 						end
+`endif
 
 				//menu mask
 				'h2E: if(byte_cnt == 1) io_dout <= status_menumask;
@@ -876,6 +1088,28 @@ always@(posedge clk_sys) begin : uio_block
 					 4: joystick_r_analog_4 <= lw_dat[15:0];
 					 5: joystick_r_analog_5 <= lw_dat[15:0];
 				endcase
+`ifdef MISTER_LW_KBM
+			// the key frame, formed and toggled as the link's frame end forms it; the mouse's extension, then its
+			// packet with bit 24's toggle; a trigger pair, a level
+			'h05: if(!lw_idx) begin
+					ps2_key <= {~ps2_key[10], lw_pressed, lw_extended, lw_dat[7:0]};
+					if(lw_dat == 'hE012E07C) ps2_key[9:0] <= 'h37C; // prnscr pressed
+					if(lw_dat == 'h7CE0F012) ps2_key[9:0] <= 'h17C; // prnscr released
+					if(lw_dat == 'hF014F077) ps2_key[9:0] <= 'h377; // pause  pressed
+				end
+			'h04: case(lw_idx)
+					0: ps2_mouse <= {~ps2_mouse[24], lw_dat[23:0]};
+					1: ps2_mouse_ext <= lw_dat[15:0];
+				endcase
+			'h46: case(lw_idx)
+					0: {joystick_rt_analog_0, joystick_lt_analog_0} <= lw_dat[15:0];
+					1: {joystick_rt_analog_1, joystick_lt_analog_1} <= lw_dat[15:0];
+					2: {joystick_rt_analog_2, joystick_lt_analog_2} <= lw_dat[15:0];
+					3: {joystick_rt_analog_3, joystick_lt_analog_3} <= lw_dat[15:0];
+					4: {joystick_rt_analog_4, joystick_lt_analog_4} <= lw_dat[15:0];
+					5: {joystick_rt_analog_5, joystick_lt_analog_5} <= lw_dat[15:0];
+				endcase
+`endif
 		endcase
 	end
 `endif
@@ -1044,6 +1278,12 @@ endmodule
 
 `ifdef LW_EVT_X
 `undef LW_EVT_X
+`endif
+`ifdef LW_OCRAM_EVT_X
+`undef LW_OCRAM_EVT_X
+`endif
+`ifdef LW_UIO_FLAGS_X
+`undef LW_UIO_FLAGS_X
 `endif
 
 //////////////////////////////////////////////////////////////////////////////////
