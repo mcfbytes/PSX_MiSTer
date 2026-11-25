@@ -35,7 +35,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: mcfbytes/Seedy_MiSTer/.github/workflows/seedy.yml@5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
+    uses: mcfbytes/Seedy_MiSTer/.github/workflows/seedy.yml@7cd491f978296e06f328fea23802819d361fb46c
     with:
       mode: hunt
       project: PSX                # the fork also has PSX_DualSDRAM.qpf; Seedy can't pick one on its own
@@ -53,4 +53,4 @@ jobs:
       job_timeout_minutes: 600
       keep_rbf: best
       override_seed: never
-      seedy_ref: 5dd940c9d7668e1ece682a0ae3dc2eb6a36225d2
+      seedy_ref: 7cd491f978296e06f328fea23802819d361fb46c
