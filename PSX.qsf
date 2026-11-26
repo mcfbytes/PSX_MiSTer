@@ -95,8 +95,8 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_OSD=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_BLK=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_SPI_BLK_UNUSED=1"
 
-# LW window diagnostics (SCRATCH): 0 = shipping, 1 = debug builds
-set_global_assignment -name VERILOG_MACRO "LW_DIAG=0"
+# LW window diagnostics (SCRATCH), debug builds only
+#set_global_assignment -name VERILOG_MACRO "MISTER_LW_DIAG=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl
