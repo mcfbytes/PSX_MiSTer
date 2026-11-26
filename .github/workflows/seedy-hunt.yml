@@ -48,7 +48,7 @@ jobs:
       # one wave per run: seeds 1-31 plus the reference compile of main = 32 builds = 16 VMs x 2, all started
       # at once, so nothing queues behind a seed that closes. Jobs can't signal each other mid-run, so this is
       # the short-circuit. If none closes, run again with seed_start = 32 (the report says so), then 63, ...
-      seed_start: 32
+      seed_start: 1
       max_seeds: 31
       min_met: 1                  # with 16 jobs every value up to 16 means 1 per job; one wave makes it moot
       hunt_minutes: 480
