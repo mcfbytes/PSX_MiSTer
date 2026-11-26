@@ -65,8 +65,14 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
-# Disable the VGA scaler output (analog VGA loses the scaler) to free HDMI timing margin
+# Disable the VGA scaler output and the analog OSD (the menu shows on HDMI only) to save resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_SCALER=1"
+
+# Remove the scaler's downscale path (TEST BUILD: an HDMI window smaller than the picture breaks it)
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
+
+# Scaler output lines at most 2048 pixels (only a custom video_mode wider than 2048 without pr breaks)
+set_global_assignment -name VERILOG_MACRO "MISTER_SMALL_HRES=1"
 
 # LW bridge + OCRAM mailbox (docs/LW_BRIDGE.md, docs/OCRAM_MAILBOX.md): the default disc-core set, "LW pads, OCRAM
 # bulk, SPI status". Without these macros sys/ and PSX.sv compile as stock. LW carries the pads only; the mailbox
