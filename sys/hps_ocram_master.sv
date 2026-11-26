@@ -21,8 +21,7 @@
 // The floor of the OCRAM mailbox: the AXI3 master on the fpga2hps bridge (ocram_axi.sv, the bus; ocram_arb.sv, its
 // request ports), its run latch, the poller, the hello, the EVT ring's records (ocram_evt_wr.sv) and interrupt line,
 // its consumer port, and (with MISTER_OCRAM_DIAG) the diagnostic
-// counters and the host-to-fabric torture sink. The design note is the law, spec/ocram-mailbox-design.md (the
-// Template's reader-facing copy is docs/OCRAM_MAILBOX.md); this file is layout 1 only.
+// counters and the host-to-fabric torture sink. The contract is docs/OCRAM_MAILBOX.md; this file is layout 1 only.
 //
 //  * It runs on clk_100m and no fabric reset holds it. It never abandons a transaction it started: a core reset,
 //    a stopped clk_sys or a host that has gone cannot leave one in flight.
@@ -37,9 +36,9 @@
 //    round robin between the two ports (the last granted goes last). A consumer is granted only in P_SESSION and
 //    never in a latch-set or latch-clear cycle. The records, in their own fixed order: BIND, the disc slot's REQUEST,
 //    a mount slot's REQUEST or WRITE, REPLY, the events tier's, MARK, VERDICT.
-//  * The run latch (§2.6): it sets on a rising edge of GPO bit 28 (RUN) seen while GPO bit 31 is 1 and no HPS
-//    reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's return never sets it. Every GPO bit
-//    and hps_rst_n enters through an lw_arst cell, never raw.
+//  * The run latch (docs/OCRAM_MAILBOX.md, "The master"): it sets on a rising edge of GPO bit 28 (RUN) seen while
+//    GPO bit 31 is 1 and no HPS reset is seen; it clears on RUN low, bit 31 low or an HPS reset, and bit 31's
+//    return never sets it. Every GPO bit and hps_rst_n enters through an lw_arst cell, never raw.
 //  * On a stop: the transaction in flight completes, a record being written is abandoned (its head is not
 //    stored), then one terminal store C_HELLO = 0x51540000. An HPS reset ends a run with no terminal store.
 //  * An HPS reset makes the master start nothing; a transaction in flight keeps its valids and readies as AXI
@@ -334,11 +333,12 @@ generate
 	    C_K11 >= 16'h0100) begin : g_ctrl_span
 		ocram_control_constant_above_0xFF guard();
 	end
-	// the mount slots: hps_io slots 0-15, none the disc slot's or the other's; a block of 1 to 1,020 words
+	// the mount slots: hps_io slots 0-15, none the disc slot's or the other's; a frame of one hps_io block
+	// (32 << BLKSZ words) to 1,020 words
 	if ((MNT0_EN != 0 && (MNT0_SLOT > 15 || MNT0_SLOT == SEC_SLOT)) ||
 	    (MNT1_EN != 0 && (MNT1_SLOT > 15 || MNT1_SLOT == SEC_SLOT)) ||
 	    (MNT0_EN != 0 && MNT1_EN != 0 && MNT0_SLOT == MNT1_SLOT) ||
-	    (MNT_EN && (MNT_FRAME == 0 || MNT_FRAME > 1020))) begin : g_mnt_geometry
+	    (MNT_EN && (MNT_FRAME < (32'd32 << SEC_BLKSZ) || MNT_FRAME > 1020))) begin : g_mnt_geometry
 		ocram_mount_unservable_geometry guard();
 	end
 endgenerate
@@ -898,6 +898,7 @@ assign p_start = 1'b0, p_wtake = 1'b0, e_free = 16'd0;
 localparam [1:0] EK_STATUS = 2'd0, EK_INFO = 2'd1, EK_UPLOAD = 2'd2, EK_RUMBLE = 2'd3;
 reg         ev_have = 1'b0;            // an offer is in e_d and not spent
 reg         ev_wait = 1'b0;            // an offer is asked for and not yet in
+reg         ev_void = 1'b0;            // the offer in flight was asked for by an ended session: dropped on arrival
 reg   [1:0] rec_ek_q = EK_STATUS;      // the events record's kind
 reg   [2:0] rec_pad_q = 3'd0;          // a RUMBLE's pad
 reg   [3:0] st_flag_q = 4'd0;          // the STATUS being written: its stflg
@@ -1404,10 +1405,15 @@ always @(posedge clk) begin
 	// the events tier's offers: one asked for at a time; spent into a record, or at once when it needs none
 	ev_abandon <= 1'b0;
 	if (e_ask) ev_wait <= 1'b1;
-	if (e_v) begin ev_wait <= 1'b0; ev_have <= 1'b1; end
+	if (e_v) begin ev_wait <= 1'b0; ev_have <= !ev_void; ev_void <= 1'b0; end
 	else if (w_start[S_EV] || (w_wtake[S_EV] && st_wait)) ev_have <= 1'b0;
 	else if (ev_have && ev_bound && !st_open && !ev_rec) ev_have <= 1'b0;
 	if (ev_drop) ev_abandon <= 1'b1;
+	// a session's end spends the offer in hand, and voids the one in flight: none is posted in the next session
+	if (run_ended || hello_start) begin
+		ev_have <= 1'b0;
+		if ((ev_wait && !e_v) || e_ask) ev_void <= 1'b1;
+	end
 	if (hello_start) begin
 		st_last_q  <= 4'd0;
 		rum_last_q <= 96'd0;
