@@ -4,8 +4,13 @@
 #   git commit --allow-empty -m "[seedy hunt] <what changed>"
 # Any other push starts nothing (a mention of the tag elsewhere in a message doesn't count), so nothing is billed
 # by accident. A new hunt push cancels a hunt still running.
-# Before pushing, scale the VMs up (they delete themselves 10 minutes after their last job):
-#   az vmss scale -g seedy-rg -n seedy-runners --new-capacity 16
+# Then, right after the push (not before: VMs that register and find no job delete themselves after 10 idle
+# minutes, so waiting for all 16 to show up loses the early ones):
+#   az vmss list-instances -g seedy-rg -n seedy-runners -o table   # must be empty: leftover VMs count toward
+#   az vmss scale -g seedy-rg -n seedy-runners --new-capacity 16      # the 16 but may retire before taking a job
+# If leftovers were there, run the scale command again once they are gone (nothing replaces a VM that retires;
+# a job without a VM waits for one to free up). VMs take ~3-25 min to register: each pulls the 2.75 GiB Quartus
+# image from the Basic-tier registry, which 16 VMs share. Each VM deletes itself 10 minutes after its last job.
 #
 # Sizing, measured 2026-11-25 (Seedy session): a PSX build peaks at 7.0 GiB. With the .qsf's
 # NUM_PARALLEL_PROCESSORS ALL, Quartus runs up to min(CPUs, 16) fitter threads, and those mostly spin when they
@@ -43,7 +48,7 @@ jobs:
       # one wave per run: seeds 1-31 plus the reference compile of main = 32 builds = 16 VMs x 2, all started
       # at once, so nothing queues behind a seed that closes. Jobs can't signal each other mid-run, so this is
       # the short-circuit. If none closes, run again with seed_start = 32 (the report says so), then 63, ...
-      seed_start: 1
+      seed_start: 32
       max_seeds: 31
       min_met: 1                  # with 16 jobs every value up to 16 means 1 per job; one wave makes it moot
       hunt_minutes: 480
